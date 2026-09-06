@@ -4,6 +4,10 @@ Short answers to the things people actually want to do. Every snippet here is co
 and, where it needs no socket, run — as part of the test suite, so a recipe that stops
 working fails the build rather than quietly misleading somebody.
 
+The recipes assume the **default features**. Two of them reach past that floor and say so:
+the P1 reader needs `p1`, and the named OBIS constants need `obis-names`. Everything else
+works with `client`, `server` and whichever transport you are using.
+
 ## Read one register over TCP
 
 The session is sans-I/O: it hands you bytes and takes bytes back. A socket is yours.

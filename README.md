@@ -15,7 +15,7 @@ a WASM decoder in a browser, and a meter or gateway on a Cortex-M under Embassy.
 
 ```rust
 use dlms_cosem_rs::client::{AssociationStep, ClientConfig, ClientSession, Response};
-use dlms_cosem_rs::obis::names::ACTIVE_ENERGY_IMPORT_TOTAL;
+use dlms_cosem_rs::obis::Obis;
 use dlms_cosem_rs::security::{KeyRing, RustCryptoProvider};
 use dlms_cosem_rs::xdlms::AttributeDescriptor;
 
@@ -35,8 +35,10 @@ let n = session.associate_request(&mut request)?;
 # let m = server.handle(&request[..n], &mut response)?;
 assert_eq!(session.handle_associate_response(&response[..m])?, AssociationStep::Established);
 
+// Class 3 is Register, attribute 2 is its value. `obis-names` gives the well-known
+// codes names — `obis::names::ACTIVE_ENERGY_IMPORT_TOTAL` is this one.
 let n = session.get_request(
-    AttributeDescriptor::new(3, ACTIVE_ENERGY_IMPORT_TOTAL, 2),
+    AttributeDescriptor::new(3, Obis::new(1, 0, 1, 8, 0, 255), 2),
     None,
     &mut request,
 )?;
@@ -52,7 +54,6 @@ if let Response::Data(value) = session.handle_response(&response[..m], &mut scra
 # use dlms_cosem_rs::axdr::Data;
 # use dlms_cosem_rs::codec::{Encode, Writer};
 # use dlms_cosem_rs::cosem::AttributeAccess;
-# use dlms_cosem_rs::obis::Obis;
 # use dlms_cosem_rs::server::{ObjectStore, Server, ServerConfig, StoreResult};
 # use dlms_cosem_rs::xdlms::{DataAccessResult, SelectiveAccess};
 # struct OneRegister;

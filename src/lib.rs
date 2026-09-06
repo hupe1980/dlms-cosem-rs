@@ -47,8 +47,25 @@ extern crate std;
 
 /// Recipes for the things people actually do with this crate.
 ///
-/// Every example here is compiled and run as a doctest, so a snippet that stops
-/// compiling fails the build rather than quietly misleading somebody.
+/// Every example here is compiled — and, where it needs no socket, run — as a doctest,
+/// so a snippet that stops compiling fails the build rather than quietly misleading
+/// somebody. That is the whole value of the page, and it is also why the module is
+/// gated: a recipe reaches for the P1 reader and the well-known OBIS names, and a
+/// doctest cannot be conditional on a feature the way a function can. Documenting a
+/// recipe that will not compile in the reader's own configuration is exactly the kind of
+/// quietly-wrong documentation the compilation is meant to prevent.
+///
+/// `docs.rs` builds with every feature, so the published documentation always has it.
+#[cfg(all(
+    feature = "std",
+    feature = "client",
+    feature = "server",
+    feature = "hdlc",
+    feature = "wrapper",
+    feature = "p1",
+    feature = "suite0",
+    feature = "obis-names",
+))]
 #[doc = include_str!("../site/includes/cookbook.md")]
 pub mod cookbook {}
 

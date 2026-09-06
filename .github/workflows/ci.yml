@@ -25,6 +25,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
       - run: cargo test --no-default-features --features std,client,server,hdlc,wrapper,suite0
+      - name: the front-page example compiles at its feature floor
+        # `README.md` is the crate-level documentation and is included unconditionally, so
+        # its example has to compile for every reader rather than only for one who took
+        # the default features. This is the smallest set it needs. The cookbook needs a
+        # larger set and says so in `lib.rs`, which is why it is gated rather than pinned
+        # here: a doctest cannot be conditional on a feature the way a function can.
+        run: cargo test --doc --no-default-features --features std,client,server,suite0
       - name: every feature stands on its own
         run: |
           set -euo pipefail
