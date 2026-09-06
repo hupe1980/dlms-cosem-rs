@@ -39,6 +39,14 @@ pub enum ErrorKind {
     InvalidLength,
     /// Nesting deeper than the configured limit. Guards recursion on hostile input.
     DepthExceeded,
+    /// A value that would take more work to expand than any real one needs.
+    ///
+    /// The sibling of [`ErrorKind::DepthExceeded`]: depth bounds how far a decoder
+    /// recurses, this bounds how *wide* it goes. A compact array's type description
+    /// multiplies — `array 7425 of array 285 of array 257` is fourteen bytes describing
+    /// half a billion values — so the cost of walking one must be bounded before it is
+    /// walked, not discovered while walking it.
+    WorkExceeded,
     /// The output buffer is full.
     BufferTooSmall {
         /// Bytes the failing write still wanted.
@@ -73,6 +81,7 @@ impl fmt::Display for ErrorKind {
             Self::TypeMismatch => f.write_str("value is not of the type this position requires"),
             Self::InvalidLength => f.write_str("invalid length"),
             Self::DepthExceeded => f.write_str("nesting too deep"),
+            Self::WorkExceeded => f.write_str("a value that would take unbounded work to expand"),
             Self::BufferTooSmall { needed } => write!(f, "buffer too small, needed {needed}"),
             Self::BadChecksum => f.write_str("checksum mismatch"),
             Self::BadTag => f.write_str("authentication tag mismatch"),

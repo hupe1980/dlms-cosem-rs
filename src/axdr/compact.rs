@@ -170,10 +170,11 @@ impl<'a> CompactArray<'a> {
         let desc = self.description()?;
         let mut contents = Reader::with_base(self.contents, self.contents_base);
         let mut row = 0usize;
+        let mut budget = Budget::new();
         while !contents.is_empty() {
             let before = contents.offset();
             let mut column = 0usize;
-            walk(&mut contents, &desc, self.depth, &mut |value| {
+            walk(&mut contents, &desc, self.depth, &mut budget, &mut |value| {
                 let leaf = CompactLeaf { row, column, value };
                 column += 1;
                 f(leaf)
@@ -192,9 +193,10 @@ impl<'a> CompactArray<'a> {
         let desc = self.description()?;
         let mut contents = Reader::with_base(self.contents, self.contents_base);
         let mut rows = 0;
+        let mut budget = Budget::new();
         while !contents.is_empty() {
             let before = contents.offset();
-            walk(&mut contents, &desc, self.depth, &mut |_| Ok(()))?;
+            walk(&mut contents, &desc, self.depth, &mut budget, &mut |_| Ok(()))?;
             ensure_progress(&contents, before)?;
             rows += 1;
         }
@@ -230,12 +232,50 @@ impl<'a> CompactArray<'a> {
         let desc = self.description()?;
         let mut contents = Reader::with_base(self.contents, self.contents_base);
         let mut out = alloc::vec::Vec::new();
+        let mut budget = Budget::new();
         while !contents.is_empty() {
             let before = contents.offset();
-            out.push(build(&mut contents, &desc, self.depth)?);
+            out.push(build(&mut contents, &desc, self.depth, &mut budget)?);
             ensure_progress(&contents, before)?;
         }
         Ok(out)
+    }
+}
+
+/// The most values one compact array may expand to, counting every node of every row.
+///
+/// A type description *multiplies*: `array 7425 of array 285 of array 257 of structure
+/// {}` is fourteen bytes on the wire and half a billion steps to walk. Neither the depth
+/// bound nor [`TypeDesc::leaf_count`] catches it — the nesting is only four deep, and the
+/// leaf count is *zero*, because the innermost shape holds nothing. Zero leaves still
+/// costs 7425 × 285 × 257 iterations to discover.
+///
+/// So the walk carries a budget and spends one from it per node. The number is far above
+/// anything real: every leaf that carries data consumes at least one byte, so a genuine
+/// compact array cannot hold more values than its contents have bytes, and an APDU is
+/// bounded by the negotiated PDU size. Only `null-data` and `dont-care` are free, and a
+/// million of those is padding rather than a reading.
+pub const MAX_COMPACT_NODES: usize = 1 << 20;
+
+/// The remaining node budget for one walk of one compact array.
+///
+/// Held for the whole array rather than reset per row: the cost that matters is what
+/// decoding the value costs altogether, and a row is only cheap because there are many.
+struct Budget(usize);
+
+impl Budget {
+    const fn new() -> Self {
+        Self(MAX_COMPACT_NODES)
+    }
+
+    fn spend(&mut self, r: &Reader<'_>) -> Result<()> {
+        match self.0.checked_sub(1) {
+            Some(left) => {
+                self.0 = left;
+                Ok(())
+            }
+            None => Err(r.err(ErrorKind::WorkExceeded)),
+        }
     }
 }
 
@@ -298,17 +338,19 @@ fn walk<'a>(
     contents: &mut Reader<'a>,
     desc: &TypeDesc<'_>,
     depth: u8,
+    budget: &mut Budget,
     f: &mut dyn FnMut(Data<'a>) -> Result<()>,
 ) -> Result<()> {
     if depth >= MAX_DEPTH {
         return Err(contents.err(ErrorKind::DepthExceeded));
     }
+    budget.spend(contents)?;
     match *desc {
         TypeDesc::Scalar(tag) => f(leaf(contents, tag)?),
         TypeDesc::Array { len, elem } => {
             let inner = TypeDesc::parse(&mut Reader::new(elem))?;
             for _ in 0..len {
-                walk(contents, &inner, depth + 1, f)?;
+                walk(contents, &inner, depth + 1, budget, f)?;
             }
             Ok(())
         }
@@ -316,7 +358,7 @@ fn walk<'a>(
             let mut dr = Reader::new(fields);
             for _ in 0..count {
                 let inner = TypeDesc::parse(&mut dr)?;
-                walk(contents, &inner, depth + 1, f)?;
+                walk(contents, &inner, depth + 1, budget, f)?;
             }
             Ok(())
         }
@@ -324,27 +366,35 @@ fn walk<'a>(
 }
 
 #[cfg(feature = "alloc")]
-fn build(contents: &mut Reader<'_>, desc: &TypeDesc<'_>, depth: u8) -> Result<super::DataBuf> {
+fn build(
+    contents: &mut Reader<'_>,
+    desc: &TypeDesc<'_>,
+    depth: u8,
+    budget: &mut Budget,
+) -> Result<super::DataBuf> {
     use super::DataBuf;
     if depth >= MAX_DEPTH {
         return Err(contents.err(ErrorKind::DepthExceeded));
     }
+    // Spent before the `with_capacity` below, which would otherwise reserve for a length
+    // taken straight off the wire.
+    budget.spend(contents)?;
     Ok(match *desc {
         TypeDesc::Scalar(tag) => DataBuf::from_data(&leaf(contents, tag)?)?,
         TypeDesc::Array { len, elem } => {
             let inner = TypeDesc::parse(&mut Reader::new(elem))?;
-            let mut v = alloc::vec::Vec::with_capacity(usize::from(len));
+            let mut v = alloc::vec::Vec::with_capacity(usize::from(len).min(MAX_COMPACT_NODES));
             for _ in 0..len {
-                v.push(build(contents, &inner, depth + 1)?);
+                v.push(build(contents, &inner, depth + 1, budget)?);
             }
             DataBuf::Array(v)
         }
         TypeDesc::Structure { count, fields } => {
             let mut dr = Reader::new(fields);
-            let mut v = alloc::vec::Vec::with_capacity(count);
+            let mut v = alloc::vec::Vec::with_capacity(count.min(MAX_COMPACT_NODES));
             for _ in 0..count {
                 let inner = TypeDesc::parse(&mut dr)?;
-                v.push(build(contents, &inner, depth + 1)?);
+                v.push(build(contents, &inner, depth + 1, budget)?);
             }
             DataBuf::Structure(v)
         }

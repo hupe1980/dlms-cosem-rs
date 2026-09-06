@@ -13,7 +13,7 @@ mod data;
 mod datetime;
 mod unit;
 
-pub use compact::{CompactArray, CompactLeaf, TypeDesc};
+pub use compact::{CompactArray, CompactLeaf, MAX_COMPACT_NODES, TypeDesc};
 pub use data::{BitStr, Data, DataTag, MAX_DEPTH, Seq, SeqIter};
 pub use datetime::{ClockStatus, DEVIATION_NOT_SPECIFIED, Date, DateTime, Time};
 pub use unit::{ScaledValue, Unit};

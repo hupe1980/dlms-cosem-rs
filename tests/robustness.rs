@@ -10,8 +10,8 @@
 //! is right — that is what the vector and association tests are for.
 
 use dlms_cosem_rs::acse::{Aare, Aarq, Rlre, Rlrq};
-use dlms_cosem_rs::axdr::Data;
-use dlms_cosem_rs::codec::Decode;
+use dlms_cosem_rs::axdr::{Data, DataBuf};
+use dlms_cosem_rs::codec::{Decode, ErrorKind};
 use dlms_cosem_rs::transport::{hdlc, wrapper};
 use dlms_cosem_rs::xdlms::Apdu;
 
@@ -297,6 +297,72 @@ fn a_zero_width_compact_array_row_is_refused_rather_than_split_forever() {
     if let Ok(Data::CompactArray(c)) = Data::from_bytes(&bytes) {
         assert!(c.row_count().is_err());
     }
+}
+
+#[test]
+fn a_compact_array_whose_description_multiplies_is_refused_before_it_is_walked() {
+    // Found by the fuzzer, and the first finding that was a real denial of service
+    // rather than a wrong assertion. Fourteen bytes:
+    //
+    //     array 7425 of array 285 of array 257 of structure {}
+    //
+    // The depth bound does not catch it — the nesting is four deep. `leaf_count` does
+    // not catch it either, and this is the trap: the product is *zero*, because the
+    // innermost shape holds nothing. Zero leaves still costs 7425 × 285 × 257 ≈ 5.4e8
+    // iterations to find out, and the guard that refuses a zero-width row only runs
+    // once the walk it is guarding has returned. libFuzzer timed out at 20 minutes.
+    //
+    // The fix bounds the work rather than the result, because the work is what the
+    // sender chooses.
+    let bytes = [0x13, 0x01, 0x1d, 0x01, 0x01, 0x1d, 0x01, 0x01, 0x01, 0x02, 0x00, 0x02, 0x25, 0x02];
+    let d = Data::from_bytes(&bytes).expect("the description itself is well formed");
+    let Data::CompactArray(c) = d else { panic!("expected a compact array") };
+
+    // What matters is that these return at all; the assertion is that they refuse.
+    assert_eq!(c.row_count().unwrap_err().kind, ErrorKind::WorkExceeded);
+    assert_eq!(c.for_each_leaf(|_| Ok(())).unwrap_err().kind, ErrorKind::WorkExceeded);
+    assert_eq!(c.to_rows().unwrap_err().kind, ErrorKind::WorkExceeded);
+
+    // `to_owned` is the path an ordinary `alloc` caller reaches this by, and it is the
+    // worse one: `build` allocates a node per step, so the same fourteen bytes are an
+    // out-of-memory rather than only a stall.
+    assert!(DataBuf::from_data(&Data::CompactArray(c)).is_err());
+}
+
+#[test]
+fn a_compact_array_that_multiplies_into_real_leaves_is_bounded_too() {
+    // The zero-leaf case above is the one the fuzzer found, but a description whose
+    // leaves are real is bounded by the same budget rather than by a special case:
+    // `array 65535 of array 65535 of null-data` is 4.3e9 leaves from seven bytes.
+    let bytes = [0x13, 0x01, 0xFF, 0xFF, 0x01, 0xFF, 0xFF, 0x00, 0x01, 0xAA];
+    if let Ok(Data::CompactArray(c)) = Data::from_bytes(&bytes) {
+        assert_eq!(c.row_count().unwrap_err().kind, ErrorKind::WorkExceeded);
+    }
+}
+
+#[test]
+fn a_compact_array_the_size_of_a_real_profile_still_decodes() {
+    // The budget must not be so tight that it refuses a load profile. 2000 rows of
+    // `structure { double-long-unsigned, long-unsigned }` is 12 000 bytes and 6000
+    // nodes — an ordinary quarter-hour buffer, and it must walk without complaint.
+    const ROWS: usize = 2000;
+    let mut bytes = vec![0x13, 0x02, 0x02, 0x06, 0x12];
+    let contents_len = ROWS * 6;
+    bytes.push(0x82);
+    bytes.extend_from_slice(&u16::try_from(contents_len).unwrap().to_be_bytes());
+    bytes.extend(core::iter::repeat_n(0u8, contents_len));
+
+    let d = Data::from_bytes(&bytes).expect("a profile-shaped compact array");
+    let Data::CompactArray(c) = d else { panic!("expected a compact array") };
+    assert_eq!(c.row_count().expect("a real profile is not refused"), ROWS);
+
+    let mut leaves = 0;
+    c.for_each_leaf(|_| {
+        leaves += 1;
+        Ok(())
+    })
+    .expect("every leaf is visited");
+    assert_eq!(leaves, ROWS * 2);
 }
 
 #[test]

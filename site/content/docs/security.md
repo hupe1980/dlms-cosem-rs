@@ -197,6 +197,7 @@ is no default that silently starts at zero without the field saying so.
 | The same | downgrade to a weaker suite or to plaintext | unprotecting returns *what was found*; the session compares it with the negotiated policy and refuses a weaker frame |
 | The same | tag forgery, tampering | GCM tags verified before parsing — decrypt-before-parse is the only path |
 | A head-end process | parser crash, memory exhaustion | panic-free fuzzed decoders; the negotiated PDU size, the GBT window and the HDLC information field bound every buffer |
+| The same | a small message that costs a large amount of work | a compact array's type description *multiplies*, so the walk carries a node budget — fourteen bytes describing half a billion values are refused rather than expanded |
 | Meter firmware | unauthorised ACTION | access rights enforced *before* the store is asked; a single-use challenge; an audit hook on every method |
 | A reading | an answer to a different question | every response must carry the invoke id of the outstanding request |
 | Association terms | context or mechanism downgrade | the client refuses an AARE accepting a different context or mechanism than it proposed, and a refusal is answered in the context that was *proposed* |

@@ -165,9 +165,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-fuzz --locked
       - name: fuzz every decoder briefly
+        # `-timeout=20` bounds one input, `-max_total_time` bounds the campaign. Without
+        # the first, libFuzzer waits its 1200s default before calling a stall a failure,
+        # so a 60s budget can take twenty minutes to fail — which is exactly how the
+        # compact-array work bound (D48) was found. A decoder is microseconds per input;
+        # anything near twenty seconds is a denial of service, not a slow case.
         run: |
           for t in data apdu acse hdlc wrapper server_session notification gbt p1; do
-            cargo fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=4096
+            cargo fuzz run "$t" -- -max_total_time=60 -timeout=20 -rss_limit_mb=4096
           done
 
   semver:
