@@ -297,7 +297,13 @@ fn parse_timestamp(s: &str) -> Option<DateTime> {
     let two = |i: usize| -> Option<u8> {
         let hi = b.get(i)?.checked_sub(b'0')?;
         let lo = b.get(i + 1)?.checked_sub(b'0')?;
-        (hi <= 9 && lo <= 9).then_some(hi * 10 + lo)
+        // Rejected *before* the multiply, not inside a `then_some`: that takes its
+        // argument by value, so `hi * 10` runs whatever the condition says. Any byte
+        // above `'9'` — a letter, most of the printable range — overflows a `u8` there.
+        if hi > 9 || lo > 9 {
+            return None;
+        }
+        Some(hi * 10 + lo)
     };
     let daylight_saving = match b.get(12)? {
         b'S' => true,
@@ -604,6 +610,37 @@ mod tests {
         let mut out = [0u8; 32];
         let n = id.decode_hex(&mut out).unwrap();
         assert_eq!(&out[..n], b"K8EG004046395507");
+    }
+
+    /// A timestamp field is thirteen bytes of anything, not thirteen digits.
+    #[test]
+    fn a_timestamp_full_of_letters_is_refused_rather_than_overflowing() {
+        // Found by `cargo fuzz`. The digit pair was validated with `then_some`, which
+        // takes its argument by value — so `hi * 10` ran before the `hi <= 9` guard
+        // could reject it, and any byte above `'9'` overflows a `u8`. Most of the
+        // printable range does: `'g'` is 103, and 103 - '0' is 55.
+        //
+        // A P1 port is a serial connector on the outside of a meter. Thirteen bytes of
+        // line noise in a timestamp field is a loose plug, not an attack, and it must
+        // read as "no timestamp".
+        for raw in [
+            "(gggggggggggg W)", // letters throughout
+            "(gggggggggggS)",   // and with a valid daylight-saving flag
+            "(101209112500g)",  // a good timestamp, bad flag
+            "(1012091125zzW)",  // letters only in the seconds
+            "(zz1209112500W)",  // and only in the year
+            "(::::::::::::W)",  // ':' is 58 — just above '9', the boundary case
+            "(////////////W)",  // '/' is 47 — just below '0', which `checked_sub` caught
+        ] {
+            let line = Line { obis: Obis::new(0, 0, 1, 0, 0, 255), raw };
+            assert_eq!(line.as_timestamp(), None, "{raw} is not a timestamp");
+        }
+
+        // The boundary the guard actually defends: '9' is the last digit that works.
+        let good = Line { obis: Obis::new(0, 0, 1, 0, 0, 255), raw: "(991231235959W)" };
+        let ts = good.as_timestamp().expect("all nines is a real timestamp");
+        assert_eq!((ts.year, ts.month, ts.day_of_month), (2099, 12, 31));
+        assert_eq!((ts.hour, ts.minute, ts.second), (23, 59, 59));
     }
 
     /// The gas line carries two values, and the second is the reading.

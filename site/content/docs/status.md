@@ -61,7 +61,7 @@ than left to be discovered.
 
 ## What the tests actually prove
 
-308 tests — and it is worth being precise about what they are worth. A claim about the wire
+309 tests — and it is worth being precise about what they are worth. A claim about the wire
 is worth what its evidence is worth, and there are three kinds here.
 
 **Third-party bytes, the strongest thing on this list.** The `InitiateRequest` and
@@ -78,6 +78,16 @@ on every commit: 40 000 mutated and random inputs across nine decoders, every pr
 every seed, 100 000-deep nesting refused rather than recursed. And the panic-symbol scan,
 which is a measurement rather than an argument — see
 [Embedded and no_std](@/docs/embedded.md).
+
+That scan has one blind spot worth naming, because it is the kind of thing a status page
+exists to say. It builds in release, where Rust turns arithmetic overflow checks *off* —
+so it proves nothing about overflow. A reachable overflow panic sat in the P1 timestamp
+parser behind that gap until a fuzzer found it: a validated digit pair was computed before
+the validation could reject it, and any letter in a timestamp field would panic a build
+with the checks on. What covers this class is the fuzzers, which do enable the checks. A
+separate CI step now counts the remaining overflow paths and refuses to let the number
+grow; the ones left are length arithmetic bounded by buffers the compiler cannot see the
+bounds of, none of them known to be reachable.
 
 A round-trip suite starts from *values* rather than from bytes, enumerating every variant
 of every service by hand. That direction matters: a byte-driven harness can only ever reach

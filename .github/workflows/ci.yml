@@ -157,6 +157,34 @@ jobs:
             echo "::endgroup::"
           done
 
+      # The scan above builds with `overflow-checks` off, which is the release default —
+      # so it says nothing about arithmetic overflow. That blind spot hid a reachable
+      # panic in the P1 timestamp parser until the fuzzer found it (D49), and the fuzzers
+      # are what cover this class, because cargo-fuzz enables the checks.
+      #
+      # This is a ratchet rather than a gate: the remaining sites are length arithmetic
+      # bounded by buffers the compiler cannot see the bounds of, none of them known to
+      # be reachable. The number may only go down. If a change drives it up, that is a
+      # new unchecked expression and it needs a look.
+      - name: arithmetic overflow paths may not increase
+        run: |
+          set -euo pipefail
+          BASELINE=30
+          CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true \
+            cargo build --release --target thumbv7em-none-eabihf \
+            --no-default-features --features "client,server,hdlc,wrapper,p1,suite0,obis-names"
+          lib=$(find target/thumbv7em-none-eabihf/release -name 'libdlms_cosem_rs*.rlib' | head -1)
+          objdump=$(find "$(rustc --print sysroot)" -name llvm-objdump | head -1)
+          n=$("$objdump" -dr "$lib" | grep -c 'panic_const_.*_overflow' || true)
+          echo "arithmetic overflow paths: $n (baseline $BASELINE)"
+          if [ "$n" -gt "$BASELINE" ]; then
+            echo "::error::overflow paths rose from $BASELINE to $n — check the arithmetic you added"
+            exit 1
+          fi
+          if [ "$n" -lt "$BASELINE" ]; then
+            echo "::notice::overflow paths fell to $n; lower BASELINE in ci.yml to hold the gain"
+          fi
+
   fuzz:
     runs-on: ubuntu-latest
     steps:

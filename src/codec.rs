@@ -174,9 +174,14 @@ impl<'a> Reader<'a> {
     }
 
     /// The current offset, including the base.
+    ///
+    /// Saturating rather than wrapping: this is a byte position for a diagnostic, and
+    /// the sum cannot overflow for any buffer that exists. Writing it as a plain `+`
+    /// still emitted an overflow check, and because [`Reader::err`] calls this, that
+    /// single addition put a panic path in every decoder in the crate.
     #[must_use]
     pub const fn offset(&self) -> usize {
-        self.base + self.pos
+        self.base.saturating_add(self.pos)
     }
 
     /// The bytes not yet consumed, without consuming them.
@@ -524,7 +529,9 @@ impl CountingWriter {
 
 impl Writer for CountingWriter {
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<()> {
-        self.n += bytes.len();
+        // Saturating: this counter measures a length nobody has room to reach, and a
+        // plain `+=` here is an overflow check in every `encoded_len` in the crate.
+        self.n = self.n.saturating_add(bytes.len());
         Ok(())
     }
 
