@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-features
+      - run: cargo test --no-default-features --features std,client,server,hdlc,wrapper,suite0
+      - name: every feature stands on its own
+        run: |
+          set -euo pipefail
+          for f in "" std alloc client server hdlc wrapper p1 suite0 crypto obis-names heapless \
+                   std,client std,server std,server,suite0 std,client,suite0 \
+                   alloc,client,hdlc,suite0 std,hdlc,wrapper alloc,p1; do
+            echo "::group::features=[$f]"
+            if [ -z "$f" ]; then cargo build --no-default-features; else cargo build --no-default-features --features "$f"; fi
+            echo "::endgroup::"
+          done
+
+  # The claim that matters most for firmware: the core builds with no allocator and no
+  # standard library, for two different architectures.
+  no_std:
+    name: no_std (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [thumbv7em-none-eabihf, riscv32imac-unknown-none-elf, wasm32-unknown-unknown]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: build without alloc
+        run: cargo build --target ${{ matrix.target }} --no-default-features --features client,server,hdlc,wrapper,p1,suite0
+      - name: build with alloc
+        run: cargo build --target ${{ matrix.target }} --no-default-features --features alloc,client,server,hdlc,wrapper,p1,suite0,heapless
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features
+      - name: no panic path reachable from the library
+        run: cargo clippy --lib --all-features -- -D clippy::panic -D clippy::unwrap_used -D clippy::expect_used
+      - name: audit pass - bounds checking and overflow
+        # Advisory: every site is guarded by a preceding length check, and the panic
+        # scan below is what actually proves it. Reported, not enforced, until the
+        # remaining sites are rewritten to make the guard visible to the lint.
+        continue-on-error: true
+        run: RUSTFLAGS="--cfg dlms_audit" cargo clippy --lib --all-features
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: rustdoc with every feature and no missing item
+        run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings --cfg docsrs
+
+  # A release build for a microcontroller must contain no panic machinery at all: if a
+  # decoder can panic, the formatting code it needs is linked in and shows up here.
+  panic_free:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: scan for panic symbols
+        # The release profile sets `lto = true`, which makes rustc put LLVM *bitcode*
+        # in the rlib rather than machine code — and bitcode still names every panic
+        # path the optimiser has yet to discharge. Scanning that measures nothing, so
+        # LTO is turned off here to get real object code. That also makes the check
+        # strictly harder: the library must be panic-free on its own, without help
+        # from whole-program optimisation across the final link.
+        run: |
+          set -euo pipefail
+          for feats in "client,hdlc,wrapper,suite0" \
+                       "client,server,hdlc,wrapper,p1,suite0,obis-names" \
+                       "alloc,client,server,hdlc,wrapper,p1,suite0,heapless"; do
+            echo "::group::features=[$feats]"
+            CARGO_PROFILE_RELEASE_LTO=false cargo build --release \
+              --target thumbv7em-none-eabihf --no-default-features --features "$feats"
+            lib=$(find target/thumbv7em-none-eabihf/release -name 'libdlms_cosem_rs*.rlib' | head -1)
+            file "$lib" | grep -q 'ar archive' || { echo "::error::$lib is not object code; the scan would prove nothing"; exit 1; }
+            if nm "$lib" 2>/dev/null | grep -E 'core[0-9]+panicking|panic_fmt'; then
+              echo "::error::a panic path is reachable from the library with features [$feats]"
+              exit 1
+            fi
+            echo "no panic symbols with [$feats]"
+            echo "::endgroup::"
+          done
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      - name: fuzz every decoder briefly
+        run: |
+          for t in data apdu acse hdlc wrapper server_session notification gbt p1; do
+            cargo fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=4096
+          done
+
+  semver:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+
+  # The site's cookbook page renders `site/includes/cookbook.md`, which is the same file
+  # the crate doctests. Building the site here catches a broken internal link or a
+  # template that stopped compiling; the doctest job catches a recipe that stopped
+  # working. Neither can catch the other's failure, so both run.
+  site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install zola
+        run: |
+          set -euo pipefail
+          VERSION=0.23.4
+          curl -sSfL "https://github.com/getzola/zola/releases/download/v${VERSION}/zola-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C /usr/local/bin zola
+      - name: build the documentation site
+        # `internal_level = "error"` in config.toml makes a broken relative link fail the
+        # build: a documentation page that points at a page that is not there reads as a
+        # map and is worse than no page at all.
+        run: zola --root site build

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block head_title %}{{ page.title }} · {{ config.title }}{% endblock %}
+{% block head_description %}{{ page.description }}{% endblock %}
+{% block head_canonical %}{{ page.permalink }}{% endblock %}
+{% block head_og_type %}article{% endblock %}
+{% block head_og_title %}{{ page.title }}{% endblock %}
+{% block head_og_description %}{{ page.description }}{% endblock %}
+{% block head_og_url %}{{ page.permalink }}{% endblock %}
+{% block head_tw_title %}{{ page.title }}{% endblock %}
+{% block head_tw_description %}{{ page.description }}{% endblock %}
+
+{% block structured_data %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "{{ page.title }}",
+  "description": "{{ page.description }}",
+  "url": "{{ page.permalink }}",
+  "inLanguage": "en",
+  "isPartOf": { "@type": "WebSite", "name": "{{ config.title }}", "url": "{{ config.base_url }}/" },
+  "about": {
+    "@type": "SoftwareSourceCode",
+    "name": "{{ config.extra.crate_name }}",
+    "codeRepository": "{{ config.extra.repository }}",
+    "programmingLanguage": "Rust"
+  }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "{{ config.title }}", "item": "{{ config.base_url }}/" },
+    { "@type": "ListItem", "position": 2, "name": "Documentation", "item": "{{ get_url(path='@/docs/_index.md') }}" },
+    { "@type": "ListItem", "position": 3, "name": "{{ page.title }}", "item": "{{ page.permalink }}" }
+  ]
+}
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="docs">
+    {% include "_toc.html" %}
+    <article>
+      <header>
+        <h1>{{ page.title }}</h1>
+        {% if page.description %}<p class="lede">{{ page.description }}</p>{% endif %}
+      </header>
+      {{ page.content | safe }}
+      {% if page.extra.include %}
+      {{ load_data(path=page.extra.include, format="plain") | markdown | safe }}
+      {% endif %}
+      <nav class="pager" aria-label="Pagination">
+        <span>{% if page.lower %}<a rel="prev" href="{{ page.lower.permalink }}">← {{ page.lower.title }}</a>{% endif %}</span>
+        <span>{% if page.higher %}<a rel="next" href="{{ page.higher.permalink }}">{{ page.higher.title }} →</a>{% endif %}</span>
+      </nav>
+    </article>
+  </div>
+</div>
+{% endblock %}

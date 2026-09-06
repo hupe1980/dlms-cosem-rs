@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="wrap">
+
+  <section class="hero">
+    <p class="eyebrow">IEC 62056 · Blue Book 18 · Green Book 12</p>
+    <h1>The whole of DLMS/COSEM that runs on a CPU, in one Rust crate.</h1>
+    <p class="lede">
+      The protocol a smart electricity, gas, water or heat meter speaks to the system that
+      reads it — the object model, the application layer and the transports — with no
+      sockets, no clock and no async runtime in the core. The same code drives a head-end
+      under Tokio, a WASM decoder in a browser, and meter firmware on a Cortex-M.
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="{{ get_url(path='@/docs/getting-started.md') }}">Get started</a>
+      <a class="btn" href="{{ get_url(path='@/docs/status.md') }}">What is built</a>
+      <a class="btn" href="{{ config.extra.repository }}">Source</a>
+    </div>
+    <p class="muted" style="margin-top:1.5rem">
+      <span class="pill pill-warn">pre-release</span>
+      Not yet published to crates.io — build it from
+      <a href="{{ config.extra.repository }}">the repository</a>. The API is being made
+      right rather than kept stable.
+    </p>
+  </section>
+
+  <div class="split">
+    <div>
+      <h2 id="read">Read a register</h2>
+      <p>The session hands you bytes and takes bytes back. Where they go is yours.</p>
+{{ load_data(path="includes/snippet-read.md", format="plain") | markdown | safe }}
+    </div>
+    <div>
+      <h2 id="push">Decrypt a meter's push</h2>
+      <p>
+        The Austrian, Luxembourg and Dutch customer interfaces emit a ciphered
+        <code>DataNotification</code> with no association and nothing to correlate. That
+        is a listener, not a session.
+      </p>
+{{ load_data(path="includes/snippet-push.md", format="plain") | markdown | safe }}
+    </div>
+  </div>
+
+  <h2 id="why">Why another one</h2>
+  <p>
+    Every existing DLMS stack gives up at least two of these. This one is meant to give up
+    none.
+  </p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Permissively licensed</h3>
+      <p>MIT or Apache-2.0. The reference implementation is GPL-2 or commercial; the
+      nearest other Rust one is GPL-3.</p>
+    </div>
+    <div class="card">
+      <h3><code>no_std</code>, <code>alloc</code> optional</h3>
+      <p>The full codec, HDLC, the wrapper, <em>both</em> engines and suite 0 build for
+      <code>thumbv7em-none-eabihf</code> with no allocator at all.</p>
+    </div>
+    <div class="card">
+      <h3>Sans-I/O</h3>
+      <p>A whole ciphered association runs as a unit test in microseconds, and the server
+      is fuzzed as a state machine rather than as a parser.</p>
+    </div>
+    <div class="card">
+      <h3>Client <em>and</em> server</h3>
+      <p>From one object model. <code>cosem</code> does not depend on <code>xdlms</code>:
+      the model says what a meter is, the application layer says how to ask it.</p>
+    </div>
+    <div class="card">
+      <h3>Panic-free from the network</h3>
+      <p>A release build for two bare-metal targets contains <strong>no panic symbols at
+      all</strong> — measured on object code with LTO off, so the library stands on its
+      own. CI fails if one appears.</p>
+    </div>
+    <div class="card">
+      <h3>Replay is rejected, not documented</h3>
+      <p>Every ciphered APDU spends an invocation counter that is never accepted twice. A
+      recorded “open the breaker” is refused the second time.</p>
+    </div>
+  </div>
+
+  <h2 id="scope">What is in the box</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Layer</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>codec</code></td><td>A bounds-checked cursor. Every error carries the <strong>byte offset</strong> it happened at.</td></tr>
+      <tr><td><code>axdr</code></td><td><code>Data</code> borrowed from the input, so a load profile decodes without allocating. Compact arrays, delta types, COSEM date-times with their wildcards intact.</td></tr>
+      <tr><td><code>ber</code>, <code>acse</code></td><td>AARQ / AARE / RLRQ / RLRE: application context, authentication mechanism, system titles, conformance.</td></tr>
+      <tr><td><code>xdlms</code></td><td>Every APDU tag. GET / SET / ACTION / ACCESS, block transfer, general block transfer with its streaming window and retry, push, exceptions, the four protection wrappers.</td></tr>
+      <tr><td><code>security</code></td><td>Suites 0–2 at both key widths, <code>glo-</code>/<code>ded-</code>/general ciphering, HLS-GMAC, invocation counters with a real replay window, AES key wrap — behind a swappable provider.</td></tr>
+      <tr><td><code>cosem</code></td><td>{{ config.extra.class_count }} interface classes as a registry, OBIS, access rights in both shapes, profile buffers with every compression undone.</td></tr>
+      <tr><td><code>transport</code></td><td>HDLC with a resynchronising frame finder, segmentation and a link machine; the TCP/UDP wrapper; the P1 customer interface.</td></tr>
+      <tr><td><code>client</code>, <code>server</code></td><td>Sans-I/O state machines with block transfer both ways, every batched service, and both halves of push.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 id="honest">What it does not claim</h2>
+  <p>
+    <strong>Interoperability has not been tested.</strong> Almost every green test is this
+    crate agreeing with itself. The exceptions are the NIST and RFC cipher vectors, the
+    published xDLMS Initiate encodings and CRC-16's own check values — real independent
+    evidence, but a narrow slice of the protocol. Until it has been run against another
+    implementation this crate says “verified against the standard's own vectors”, never
+    “conformant”.
+  </p>
+  <p>
+    <a href="{{ get_url(path='@/docs/status.md') }}">The status page</a> lists what is
+    built, what is not, and why — including the parts deliberately refused rather than
+    guessed at.
+  </p>
+
+</div>
+{% endblock %}

@@ -1,0 +1,82 @@
+[package]
+name = "dlms_cosem_rs"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+description = "DLMS/COSEM (IEC 62056) in Rust: sans-I/O, no_std, client and server, security suites 0-2"
+documentation = "https://docs.rs/dlms_cosem_rs"
+repository = "https://github.com/hupe1980/dlms-cosem-rs"
+license = "MIT OR Apache-2.0"
+keywords = ["dlms", "cosem", "smart-meter", "iec62056", "obis"]
+categories = ["embedded", "encoding", "network-programming", "no-std"]
+# An explicit list rather than an exclusion, because the crate's own documentation
+# includes one file from the site (`site/includes/cookbook.md`, which is both the
+# cookbook page and a set of doctests) and packaging must not lose it — while the rest of
+# the site, the fuzz harness and the specification excerpts have no business in a
+# published crate.
+include = [
+    "/src",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/site/includes/cookbook.md",
+]
+
+[dependencies]
+bitflags = { version = "2.9", default-features = false }
+heapless = { version = "0.8", default-features = false, optional = true }
+zeroize = { version = "1.8", default-features = false, optional = true }
+subtle = { version = "2.6", default-features = false, optional = true }
+aes = { version = "0.8", default-features = false, optional = true }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes"], optional = true }
+ghash = { version = "0.5", default-features = false, optional = true }
+aes-kw = { version = "0.2", default-features = false, optional = true }
+
+[dev-dependencies]
+hex-literal = "1"
+
+# Every feature here switches code that exists. A flag that gates nothing is worse than
+# no flag: it tells a reader the crate does something it does not, and it makes
+# `--all-features` a weaker check than it looks.
+[features]
+default = ["std", "client", "server", "hdlc", "wrapper", "p1", "suite0", "obis-names"]
+
+std = ["alloc", "aes-gcm?/std"]
+alloc = []
+
+# The two engines. Either can be left out; a head-end needs no server and meter
+# firmware needs no client.
+client = []
+server = []
+
+# Transports.
+hdlc = []
+wrapper = []
+# The P1 customer interface: DSMR and eMUCs telegrams. Not DLMS on the wire — it is the
+# IEC 62056-21 data readout — but the same object model, so it lives here rather than in
+# a crate of its own.
+p1 = []
+
+# Cryptography. `suite0` brings the AES-GCM provider that suites 0, 1 and 2 all use for
+# ciphering; the asymmetric halves of suites 1 and 2 — key agreement, signing,
+# certificates — are not implemented, so there is no feature offering them.
+crypto = ["dep:zeroize", "dep:subtle"]
+suite0 = ["crypto", "dep:aes", "dep:aes-gcm", "dep:aes-kw", "dep:ghash"]
+
+# Names for the well-known OBIS codes. Pure tables; off saves the strings.
+obis-names = []
+
+# Fixed-capacity buffers, for a build with no allocator.
+heapless = ["dep:heapless"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(dlms_audit)'] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

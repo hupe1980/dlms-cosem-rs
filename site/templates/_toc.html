@@ -1,0 +1,16 @@
+{#- The documentation index, on every documentation page. Ordered by the `weight` each
+    page carries, so the reading order is a decision rather than an accident. -#}
+{% set docs = get_section(path="docs/_index.md") %}
+<nav class="toc" aria-label="Documentation">
+  <h2>Documentation</h2>
+  <ol>
+    <li>
+      <a href="{{ docs.permalink }}"{% if current_path == docs.path %} aria-current="page"{% endif %}>Overview</a>
+    </li>
+    {% for p in docs.pages %}
+    <li>
+      <a href="{{ p.permalink }}"{% if current_path == p.path %} aria-current="page"{% endif %}>{{ p.title }}</a>
+    </li>
+    {% endfor %}
+  </ol>
+</nav>

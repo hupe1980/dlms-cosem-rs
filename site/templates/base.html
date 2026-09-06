@@ -1,0 +1,82 @@
+{#- The one page skeleton. Children override the head blocks; nothing else varies.
+    No JavaScript, no web fonts, no external requests: a documentation page that needs a
+    network round trip to be legible is a documentation page that is sometimes not. -#}
+<!DOCTYPE html>
+<html lang="{{ config.default_language }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>{% block head_title %}{{ config.title }} — DLMS/COSEM in Rust{% endblock %}</title>
+<meta name="description" content="{% block head_description %}{{ config.description }}{% endblock %}">
+<link rel="canonical" href="{% block head_canonical %}{{ config.base_url }}/{% endblock %}">
+<meta name="color-scheme" content="light dark">
+
+{#- Open Graph and Twitter: what a shared link shows, which is most of what a reader sees
+    before deciding to open it. -#}
+<meta property="og:type" content="{% block head_og_type %}website{% endblock %}">
+<meta property="og:site_name" content="{{ config.title }}">
+<meta property="og:title" content="{% block head_og_title %}{{ config.title }}{% endblock %}">
+<meta property="og:description" content="{% block head_og_description %}{{ config.description }}{% endblock %}">
+<meta property="og:url" content="{% block head_og_url %}{{ config.base_url }}/{% endblock %}">
+<meta property="og:locale" content="en">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="{% block head_tw_title %}{{ config.title }}{% endblock %}">
+<meta name="twitter:description" content="{% block head_tw_description %}{{ config.description }}{% endblock %}">
+
+<link rel="icon" href="{{ get_url(path='favicon.svg') }}" type="image/svg+xml">
+<link rel="stylesheet" href="{{ get_url(path='css/main.css') }}">
+<link rel="stylesheet" href="{{ get_url(path='giallo-light.css') }}" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" href="{{ get_url(path='giallo-dark.css') }}" media="(prefers-color-scheme: dark)">
+
+{#- Structured data. The landing page is a software project; every other page is
+    documentation about it, with a breadcrumb so a search result shows where it sits. -#}
+{% block structured_data %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "{{ config.extra.crate_name }}",
+  "description": "{{ config.description }}",
+  "codeRepository": "{{ config.extra.repository }}",
+  "programmingLanguage": "Rust",
+  "license": "https://spdx.org/licenses/MIT.html",
+  "url": "{{ config.base_url }}/",
+  "keywords": "DLMS, COSEM, IEC 62056, smart meter, Rust, no_std, sans-I/O, OBIS, HDLC, DSMR, P1"
+}
+</script>
+{% endblock %}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site">
+  <a class="brand" href="{{ get_url(path='@/_index.md') }}">
+    <span class="brand-mark" aria-hidden="true">⚡</span>
+    <span class="brand-name">{{ config.extra.crate_name }}</span>
+  </a>
+  <nav aria-label="Main">
+    <a href="{{ get_url(path='@/docs/_index.md') }}">Docs</a>
+    <a href="{{ config.extra.docs_rs }}">API</a>
+    <a href="{{ config.extra.crates_io }}">crates.io</a>
+    <a href="{{ config.extra.repository }}">GitHub</a>
+  </nav>
+</header>
+
+<main id="main">
+{% block content %}{% endblock %}
+</main>
+
+<footer class="site">
+  <p>
+    <strong>{{ config.extra.crate_name }}</strong> — {{ config.extra.license }}.
+    The DLMS User Association's Blue and Green Books are the masters and are not
+    redistributed here; this crate contains encodings, tag values, class identifiers and
+    OBIS codes, which are facts, and no specification prose.
+  </p>
+  <p class="muted">
+    Not affiliated with the DLMS User Association. “DLMS” and “COSEM” are its marks.
+  </p>
+</footer>
+</body>
+</html>

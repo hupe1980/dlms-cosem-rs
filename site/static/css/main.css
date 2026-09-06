@@ -1,0 +1,280 @@
+/* dlms_cosem_rs — one stylesheet, no framework, no web fonts, no JavaScript.
+ *
+ * The palette is defined once on :root and redefined once under a dark media query.
+ * Nothing below that block names a colour literally, so the two themes cannot drift. */
+
+:root {
+  --bg: #fbfbfa;
+  --bg-raised: #ffffff;
+  --bg-sunken: #f2f2ef;
+  --fg: #1a1a18;
+  --fg-muted: #5c5c56;
+  --fg-faint: #85857d;
+  --line: #e2e2dc;
+  --accent: #9a3412;
+  --accent-soft: #fdf1e7;
+  --ok: #166534;
+  --warn: #854d0e;
+  --radius: 10px;
+  --measure: 68ch;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --bg-raised: #1b1e24;
+    --bg-sunken: #101216;
+    --fg: #e8e8e3;
+    --fg-muted: #a8a89f;
+    --fg-faint: #7d7d76;
+    --line: #2a2e36;
+    --accent: #fb923c;
+    --accent-soft: #26201a;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 var(--sans);
+  font-synthesis-weight: none;
+  text-rendering: optimizeLegibility;
+}
+
+/* Keyboard users first: the skip link is the first focusable thing on every page. */
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  padding: 0.6rem 1rem;
+  background: var(--accent);
+  color: #fff;
+  z-index: 10;
+}
+.skip:focus { left: 0; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+/* ---- chrome ------------------------------------------------------------- */
+
+header.site {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  align-items: baseline;
+  justify-content: space-between;
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: 1.1rem 1.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--fg);
+  text-decoration: none;
+}
+.brand-mark { font-size: 0.95em; }
+.brand:hover .brand-name { color: var(--accent); }
+
+header.site nav { display: flex; flex-wrap: wrap; gap: 1.25rem; font-size: 0.94rem; }
+header.site nav a { color: var(--fg-muted); text-decoration: none; }
+header.site nav a:hover { color: var(--accent); }
+header.site nav a[aria-current] { color: var(--fg); font-weight: 600; }
+
+footer.site {
+  max-width: 76rem;
+  margin: 4rem auto 0;
+  padding: 2rem 1.5rem 3rem;
+  border-top: 1px solid var(--line);
+  color: var(--fg-muted);
+  font-size: 0.88rem;
+}
+footer.site p { margin: 0 0 0.6rem; max-width: var(--measure); }
+.muted { color: var(--fg-faint); }
+
+/* ---- typography --------------------------------------------------------- */
+
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 650; letter-spacing: -0.011em; }
+h1 { font-size: clamp(1.9rem, 1.3rem + 2.2vw, 2.9rem); margin: 0 0 0.6rem; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 0.8rem; }
+h3 { font-size: 1.13rem; margin: 2rem 0 0.5rem; }
+p, ul, ol { max-width: var(--measure); }
+
+/* The anchor Zola inserts next to a heading: present for linking, quiet until hovered. */
+a.zola-anchor {
+  margin-left: 0.4rem;
+  color: var(--fg-faint);
+  text-decoration: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+h2:hover a.zola-anchor, h3:hover a.zola-anchor, a.zola-anchor:focus { opacity: 1; }
+
+strong { font-weight: 650; }
+em { font-style: italic; }
+
+code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.1em 0.34em;
+}
+
+pre {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+
+blockquote {
+  margin: 1.4rem 0;
+  padding: 0.1rem 0 0.1rem 1.1rem;
+  border-left: 3px solid var(--accent);
+  color: var(--fg-muted);
+}
+
+/* Wide content scrolls inside its own box; the page itself never scrolls sideways.
+ * Markdown emits a bare <table>, so the table is its own scroll container. */
+.table-wrap { overflow-x: auto; margin: 1.4rem 0; }
+table { border-collapse: collapse; font-size: 0.92rem; }
+article table { display: block; overflow-x: auto; max-width: 100%; margin: 1.4rem 0; }
+th, td { text-align: left; padding: 0.5rem 0.9rem 0.5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 650; color: var(--fg-muted); font-size: 0.84rem; text-transform: uppercase; letter-spacing: 0.04em; }
+td:last-child, th:last-child { padding-right: 0; }
+
+hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
+
+/* ---- layout ------------------------------------------------------------- */
+
+.wrap { max-width: 76rem; margin: 0 auto; padding: 0 1.5rem; }
+
+.hero { padding: 4rem 0 3rem; }
+.hero .lede {
+  font-size: clamp(1.05rem, 0.98rem + 0.4vw, 1.25rem);
+  color: var(--fg-muted);
+  max-width: 60ch;
+}
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin: 0 0 0.9rem;
+}
+
+.cta { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 2rem 0 0; }
+.btn {
+  display: inline-block;
+  padding: 0.62rem 1.15rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 0.94rem;
+  text-decoration: none;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary:hover { color: #fff; filter: brightness(1.08); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 1.1rem;
+  margin: 1.6rem 0;
+  max-width: none;
+}
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.15rem 1.25rem;
+}
+.card h3 { margin: 0 0 0.4rem; font-size: 1rem; }
+.card p { margin: 0; color: var(--fg-muted); font-size: 0.92rem; max-width: none; }
+
+.split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2rem; }
+@media (min-width: 62rem) {
+  .split { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 3rem; align-items: start; }
+}
+
+/* ---- docs --------------------------------------------------------------- */
+
+.docs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2rem; padding: 2.5rem 0 0; }
+@media (min-width: 60rem) {
+  .docs { grid-template-columns: 15rem minmax(0, 1fr); gap: 3.5rem; }
+  .docs nav.toc { position: sticky; top: 2rem; align-self: start; }
+}
+
+nav.toc h2 {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  margin: 0 0 0.7rem;
+}
+nav.toc ol { list-style: none; margin: 0; padding: 0; }
+nav.toc li { margin: 0 0 0.15rem; }
+nav.toc a {
+  display: block;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  text-decoration: none;
+  font-size: 0.93rem;
+}
+nav.toc a:hover { background: var(--bg-sunken); color: var(--fg); }
+nav.toc a[aria-current] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* A whole card that is a link. */
+.card-link { display: block; text-decoration: none; color: inherit; transition: border-color 0.12s; }
+.card-link:hover { border-color: var(--accent); }
+.card-link h3 { color: var(--accent); }
+
+article header p.lede { color: var(--fg-muted); font-size: 1.05rem; margin-top: 0.2rem; }
+
+.pager { display: flex; justify-content: space-between; gap: 1rem; margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); font-size: 0.94rem; }
+
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  padding: 0.16rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--fg-muted);
+  background: var(--bg-raised);
+}
+.pill-ok { color: var(--ok); border-color: currentColor; }
+.pill-warn { color: var(--warn); border-color: currentColor; }
