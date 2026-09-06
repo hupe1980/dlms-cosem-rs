@@ -1,6 +1,6 @@
 +++
 title = "Status and evidence"
-description = "What dlms_cosem_rs implements, what it deliberately refuses rather than guesses, what the test suite actually proves — and the one gap that is still open."
+description = "What dlms-cosem-rs implements, what it deliberately refuses rather than guesses, what the test suite actually proves — and the one gap that is still open."
 weight = 80
 +++
 

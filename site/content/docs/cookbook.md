@@ -1,6 +1,6 @@
 +++
 title = "Cookbook"
-description = "Compiled, runnable recipes for dlms_cosem_rs: read a register, open a ciphered association, decrypt a push, read a load profile, host a meter, parse a P1 telegram."
+description = "Compiled, runnable recipes for dlms-cosem-rs: read a register, open a ciphered association, decrypt a push, read a load profile, host a meter, parse a P1 telegram."
 weight = 20
 
 [extra]

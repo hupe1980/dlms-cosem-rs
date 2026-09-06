@@ -1,10 +1,10 @@
 [package]
-name = "dlms_cosem_rs"
+name = "dlms-cosem-rs"
 version = "0.0.1"
 edition = "2024"
 rust-version = "1.85"
 description = "DLMS/COSEM (IEC 62056) in Rust: sans-I/O, no_std, client and server, security suites 0-2"
-documentation = "https://docs.rs/dlms_cosem_rs"
+documentation = "https://docs.rs/dlms-cosem-rs"
 repository = "https://github.com/hupe1980/dlms-cosem-rs"
 license = "MIT OR Apache-2.0"
 keywords = ["dlms", "cosem", "smart-meter", "iec62056", "obis"]

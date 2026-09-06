@@ -1,5 +1,5 @@
 [package]
-name = "dlms_cosem_rs-fuzz"
+name = "dlms-cosem-rs-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.dlms_cosem_rs]
+[dependencies.dlms-cosem-rs]
 path = ".."
 features = ["std", "client", "server", "hdlc", "wrapper", "p1", "suite0"]
 

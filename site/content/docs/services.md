@@ -1,6 +1,6 @@
 +++
 title = "Services and segmentation"
-description = "GET, SET, ACTION and ACCESS in dlms_cosem_rs, the batched with-list forms, selective access, and the three segmentation mechanisms that compose rather than substitute."
+description = "GET, SET, ACTION and ACCESS in dlms-cosem-rs, the batched with-list forms, selective access, and the three segmentation mechanisms that compose rather than substitute."
 weight = 40
 +++
 

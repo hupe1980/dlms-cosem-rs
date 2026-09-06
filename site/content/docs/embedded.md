@@ -1,6 +1,6 @@
 +++
 title = "Embedded and no_std"
-description = "Build dlms_cosem_rs for a Cortex-M or RISC-V microcontroller with no allocator, and check the panic-freedom claim yourself in one command."
+description = "Build dlms-cosem-rs for a Cortex-M or RISC-V microcontroller with no allocator, and check the panic-freedom claim yourself in one command."
 weight = 60
 +++
 
@@ -8,7 +8,7 @@ weight = 60
 
 ```toml
 [dependencies]
-dlms_cosem_rs = { version = "0.0", default-features = false, features = [
+dlms-cosem-rs = { version = "0.0", default-features = false, features = [
     "client", "hdlc", "suite0",
 ] }
 ```
@@ -73,7 +73,7 @@ CARGO_PROFILE_RELEASE_LTO=false cargo build --release \
   --target thumbv7em-none-eabihf --no-default-features \
   --features client,server,hdlc,wrapper,p1,suite0
 
-nm target/thumbv7em-none-eabihf/release/libdlms_cosem_rs*.rlib \
+nm target/thumbv7em-none-eabihf/release/libdlms-cosem-rs*.rlib \
   | grep -E 'core[0-9]+panicking|panic_fmt'
 ```
 

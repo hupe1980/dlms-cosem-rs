@@ -1,11 +1,11 @@
-# dlms_cosem_rs — documentation site
+# dlms-cosem-rs — documentation site
 #
 # Static, no JavaScript required, no external requests. Zola emits `sitemap.xml` and
 # `robots.txt` itself; everything else here is either an SEO field or a decision about
 # how the pages are built.
 
 base_url = "https://hupe1980.github.io/dlms-cosem-rs"
-title = "dlms_cosem_rs"
+title = "dlms-cosem-rs"
 description = "DLMS/COSEM (IEC 62056) in one Rust crate: sans-I/O, no_std, client and server, security suites 0–2, HDLC, the TCP/UDP wrapper and the P1 customer interface."
 default_language = "en"
 author = "hupe1980"
@@ -22,7 +22,7 @@ internal_level = "error"
 # The crate is not published yet, so its crates.io and docs.rs pages do not exist. They
 # are linked anyway — they are where a reader will look the moment it is — and skipped
 # here rather than removed, so `zola check` stays usable in the meantime.
-skip_prefixes = ["https://docs.rs/dlms_cosem_rs", "https://crates.io/crates/dlms_cosem_rs"]
+skip_prefixes = ["https://docs.rs/dlms-cosem-rs", "https://crates.io/crates/dlms-cosem-rs"]
 
 [markdown]
 # Class-based highlighting rather than inline styles, so one stylesheet serves both
@@ -38,9 +38,9 @@ dark_theme = "ayu-dark"
 
 [extra]
 repository = "https://github.com/hupe1980/dlms-cosem-rs"
-crate_name = "dlms_cosem_rs"
-crates_io = "https://crates.io/crates/dlms_cosem_rs"
-docs_rs = "https://docs.rs/dlms_cosem_rs"
+crate_name = "dlms-cosem-rs"
+crates_io = "https://crates.io/crates/dlms-cosem-rs"
+docs_rs = "https://docs.rs/dlms-cosem-rs"
 license = "MIT OR Apache-2.0"
 # Asserted by `cosem::registry::the_table_is_the_size_the_documents_say_it_is`, so this
 # page cannot drift from the table it describes. A figure nothing checks is a figure that

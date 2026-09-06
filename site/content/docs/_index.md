@@ -1,6 +1,6 @@
 +++
 title = "Documentation"
-description = "How to read a meter, host one, secure an association and build for a microcontroller with dlms_cosem_rs — the DLMS/COSEM stack for Rust."
+description = "How to read a meter, host one, secure an association and build for a microcontroller with dlms-cosem-rs — the DLMS/COSEM stack for Rust."
 sort_by = "weight"
 template = "section.html"
 page_template = "page.html"
@@ -12,4 +12,4 @@ build rather than quietly misleading somebody.
 
 If you are looking for signatures rather than prose, the API reference is generated from
 the same source by `cargo doc --open`, and will be on
-[docs.rs](https://docs.rs/dlms_cosem_rs) once the crate is published.
+[docs.rs](https://docs.rs/dlms-cosem-rs) once the crate is published.

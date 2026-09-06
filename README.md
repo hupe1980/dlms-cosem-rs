@@ -1,10 +1,10 @@
-# dlms_cosem_rs
+# dlms-cosem-rs
 
 **DLMS/COSEM (IEC 62056) in one Rust crate: sans-I/O, `no_std`, client *and* server.**
 
-[![crates.io](https://img.shields.io/crates/v/dlms_cosem_rs.svg)](https://crates.io/crates/dlms_cosem_rs)
-[![docs.rs](https://img.shields.io/docsrs/dlms_cosem_rs)](https://docs.rs/dlms_cosem_rs)
-[![license](https://img.shields.io/crates/l/dlms_cosem_rs.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/dlms-cosem-rs.svg)](https://crates.io/crates/dlms-cosem-rs)
+[![docs.rs](https://img.shields.io/docsrs/dlms-cosem-rs)](https://docs.rs/dlms-cosem-rs)
+[![license](https://img.shields.io/crates/l/dlms-cosem-rs.svg)](#license)
 
 **[Documentation and guides →](https://hupe1980.github.io/dlms-cosem-rs/)**
 
@@ -243,7 +243,7 @@ itself, and a simulator somebody else's stack can read is what closes it.
 - **[Guides and reference](https://hupe1980.github.io/dlms-cosem-rs/)** — getting started,
   the cookbook, the security model, the transports, hosting a meter, and building for a
   microcontroller.
-- **[API documentation](https://docs.rs/dlms_cosem_rs)** — generated from the same source.
+- **[API documentation](https://docs.rs/dlms-cosem-rs)** — generated from the same source.
 
 ## License
 

@@ -829,7 +829,7 @@ assert_eq!(attribute_name(152, 0, 2), None);
 
 ```toml
 [dependencies]
-dlms_cosem_rs = { version = "0.0", default-features = false, features = [
+dlms-cosem-rs = { version = "0.0", default-features = false, features = [
     "client", "hdlc", "suite0",
 ] }
 ```

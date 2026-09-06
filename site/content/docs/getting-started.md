@@ -1,12 +1,12 @@
 +++
 title = "Getting started"
-description = "Install dlms_cosem_rs, understand what sans-I/O means for your code, and read your first register from a smart meter over TCP."
+description = "Install dlms-cosem-rs, understand what sans-I/O means for your code, and read your first register from a smart meter over TCP."
 weight = 10
 +++
 
 ## What this crate is, and is not
 
-`dlms_cosem_rs` implements **DLMS/COSEM** — IEC 62056, the protocol nearly every European
+`dlms-cosem-rs` implements **DLMS/COSEM** — IEC 62056, the protocol nearly every European
 smart meter speaks. The DLMS User Association describes the standard in three steps, and
 the crate follows the same three:
 
@@ -28,7 +28,7 @@ firmware on a Cortex-M with no allocator.
 
 ```toml
 [dependencies]
-dlms_cosem_rs = "0.0"
+dlms-cosem-rs = "0.0"
 ```
 
 The default feature set is `std`, `client`, `server`, `hdlc`, `wrapper`, `p1`, `suite0`

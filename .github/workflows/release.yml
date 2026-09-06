@@ -119,7 +119,7 @@ jobs:
     if: github.ref_type == 'tag' || inputs.dry_run == false
     environment:
       name: crates-io
-      url: https://crates.io/crates/dlms_cosem_rs
+      url: https://crates.io/crates/dlms-cosem-rs
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

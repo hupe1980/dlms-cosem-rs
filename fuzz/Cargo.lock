@@ -115,7 +115,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dlms_cosem_rs"
+name = "dlms-cosem-rs"
 version = "0.0.1"
 dependencies = [
  "aes",
@@ -128,10 +128,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dlms_cosem_rs-fuzz"
+name = "dlms-cosem-rs-fuzz"
 version = "0.0.0"
 dependencies = [
- "dlms_cosem_rs",
+ "dlms-cosem-rs",
  "libfuzzer-sys",
 ]
 
