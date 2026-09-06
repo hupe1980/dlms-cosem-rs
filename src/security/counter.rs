@@ -156,6 +156,20 @@ impl ReplayWindow {
         self.highest
     }
 
+    /// The lowest counter this window is certain to accept next.
+    ///
+    /// What a server puts in an `invocation-counter-error` so a peer that lost its own
+    /// counter — a meter restarted from stale storage, most often — can resynchronise
+    /// deliberately rather than by guessing upwards. It leaks nothing: an invocation
+    /// counter travels in the clear in every protected frame.
+    #[must_use]
+    pub const fn expected_next(&self) -> u32 {
+        match self.highest {
+            Some(highest) => highest.saturating_add(1),
+            None => 0,
+        }
+    }
+
     /// Whether `received` would be accepted, without recording it.
     ///
     /// This is the cheap check to run *before* verifying a tag, so a flood of obvious
@@ -165,9 +179,9 @@ impl ReplayWindow {
     /// called on a message whose tag has already verified.
     ///
     /// # Errors
-    /// [`ErrorKind::BadTag`] when the counter has been seen or is too old.
+    /// [`ErrorKind::Replay`] when the counter has been seen or is too old.
     pub fn check(&self, received: u32) -> Result<()> {
-        let replay = || Error::new(ErrorKind::BadTag, 0);
+        let replay = || Error::new(ErrorKind::Replay, 0);
         let Some(highest) = self.highest else {
             return Ok(());
         };
@@ -187,7 +201,7 @@ impl ReplayWindow {
     /// Record `received` as accepted, having verified the message it came with.
     ///
     /// # Errors
-    /// [`ErrorKind::BadTag`] when the counter has been seen or is too old.
+    /// [`ErrorKind::Replay`] when the counter has been seen or is too old.
     pub fn accept(&mut self, received: u32) -> Result<()> {
         self.check(received)?;
         match self.highest {
@@ -236,8 +250,8 @@ mod tests {
         let mut w = ReplayWindow::strict();
         assert!(w.accept(5).is_ok(), "the first message has nothing to beat");
         assert!(w.accept(6).is_ok());
-        assert_eq!(w.accept(6).unwrap_err().kind, ErrorKind::BadTag, "equal is a replay");
-        assert_eq!(w.accept(5).unwrap_err().kind, ErrorKind::BadTag, "lower is a replay");
+        assert_eq!(w.accept(6).unwrap_err().kind, ErrorKind::Replay, "equal is a replay");
+        assert_eq!(w.accept(5).unwrap_err().kind, ErrorKind::Replay, "lower is a replay");
         assert!(w.accept(7).is_ok());
         assert_eq!(w.highest(), Some(7));
     }
@@ -250,17 +264,17 @@ mod tests {
         // Everything below arrives late, in a scrambled order, and each is taken once.
         for v in [99u32, 95, 88, 97, 90] {
             assert!(w.accept(v).is_ok(), "{v} has not been seen");
-            assert_eq!(w.accept(v).unwrap_err().kind, ErrorKind::BadTag, "{v} twice is a replay");
+            assert_eq!(w.accept(v).unwrap_err().kind, ErrorKind::Replay, "{v} twice is a replay");
         }
         // And replaying the value that opened the window is still a replay.
-        assert_eq!(w.accept(100).unwrap_err().kind, ErrorKind::BadTag);
+        assert_eq!(w.accept(100).unwrap_err().kind, ErrorKind::Replay);
     }
 
     #[test]
     fn a_value_older_than_the_window_is_refused_however_wide_it_is() {
         let mut w = ReplayWindow::new(REPLAY_WINDOW_MAX * 4);
         assert!(w.accept(1000).is_ok());
-        assert_eq!(w.accept(1000 - REPLAY_WINDOW_MAX).unwrap_err().kind, ErrorKind::BadTag);
+        assert_eq!(w.accept(1000 - REPLAY_WINDOW_MAX).unwrap_err().kind, ErrorKind::Replay);
         assert!(w.accept(1000 - REPLAY_WINDOW_MAX + 1).is_ok(), "the oldest value still inside");
     }
 
@@ -270,8 +284,8 @@ mod tests {
         assert!(w.accept(1).is_ok());
         assert!(w.accept(u32::MAX).is_ok(), "a jump of four billion must not panic");
         assert_eq!(w.highest(), Some(u32::MAX));
-        assert_eq!(w.accept(u32::MAX).unwrap_err().kind, ErrorKind::BadTag);
-        assert_eq!(w.accept(1).unwrap_err().kind, ErrorKind::BadTag, "long since out of the window");
+        assert_eq!(w.accept(u32::MAX).unwrap_err().kind, ErrorKind::Replay);
+        assert_eq!(w.accept(1).unwrap_err().kind, ErrorKind::Replay, "long since out of the window");
     }
 
     #[test]
@@ -303,7 +317,7 @@ mod tests {
             }
             assert_eq!(
                 w.accept(10_000 - width - 1).unwrap_err().kind,
-                ErrorKind::BadTag,
+                ErrorKind::Replay,
                 "width {width} accepts one past its own bound"
             );
         }
@@ -312,8 +326,8 @@ mod tests {
     #[test]
     fn a_resumed_window_does_not_reaccept_what_was_stored() {
         let mut w = ReplayWindow::resumed(500, 8);
-        assert_eq!(w.accept(500).unwrap_err().kind, ErrorKind::BadTag);
-        assert_eq!(w.accept(495).unwrap_err().kind, ErrorKind::BadTag);
+        assert_eq!(w.accept(500).unwrap_err().kind, ErrorKind::Replay);
+        assert_eq!(w.accept(495).unwrap_err().kind, ErrorKind::Replay);
         assert!(w.accept(501).is_ok());
     }
 }

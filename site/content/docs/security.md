@@ -141,6 +141,30 @@ so a flood of replays is cheap, and recorded only *after* the tag verifies. The 
 hands an attacker a permanent denial of service: one forged frame with a counter near the
 top of the range, and every genuine message afterwards looks like a replay.
 
+### When a counter is wrong anyway
+
+A device *will* restart from stale storage eventually, and the exchange is built to
+recover rather than to need a site visit. A server that sees a counter it has already
+accepted answers `invocation-counter-error` **carrying the value it expects next**:
+
+```rust,ignore
+if let Response::Exception(e) = session.handle_response(&answer, &mut scratch)? {
+    if let Some(expected) = e.expected_invocation_counter {
+        // A deliberate decision, made once, by you.
+        session.set_invocation_counter(expected);
+    }
+}
+```
+
+Two things about that are deliberate. A client told only "deciphering error" learns nothing
+it can act on and retries the same frame forever, so the refusal is **named**. And the
+crate never resynchronises on its own: an exception response is unprotected, anyone can
+forge one, and moving a counter *backwards* is what burns a key — so it is handed to the
+caller as a value rather than acted on.
+
+Reading a wrong counter off the wire reveals nothing, either: an invocation counter travels
+in the clear in every protected frame already.
+
 ### What the crate cannot do for you
 
 > A counter that restarts from zero against a key that has not changed reuses every nonce

@@ -61,7 +61,7 @@ than left to be discovered.
 
 ## What the tests actually prove
 
-303 tests — and it is worth being precise about what they are worth. A claim about the wire
+305 tests — and it is worth being precise about what they are worth. A claim about the wire
 is worth what its evidence is worth, and there are three kinds here.
 
 **Third-party bytes, the strongest thing on this list.** The `InitiateRequest` and

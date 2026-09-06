@@ -374,6 +374,16 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         // are the two a client most needs told about by name.
         let plain = match self.unprotect_into(apdu, &mut plain_buf) {
             Ok(p) => p,
+            Err(e) if e.kind == ErrorKind::Replay => {
+                // A replay is not a forgery: the frame really was sent under the real
+                // key, and the commonest cause is a peer that restarted from a stale
+                // counter rather than an attacker. The standard has a code for it that
+                // carries the value expected next, so the peer can resynchronise
+                // deliberately instead of guessing upwards — and a client that treats it
+                // as an ordinary deciphering error will retry the same frame forever.
+                let expected = self.peer_replay.expected_next();
+                return self.counter_exception(expected, out);
+            }
             Err(e) => {
                 let service = if matches!(e.kind, ErrorKind::BufferTooSmall { .. }) {
                     ServiceError::PduTooLong
@@ -1740,6 +1750,25 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
     /// Protecting it spends an invocation counter, so a peer that floods malformed APDUs
     /// consumes counter space. That is true of any protected reply and is bounded by the
     /// same 2³² ceiling; refusing to answer at all would be the larger problem.
+    /// Refuse a replayed frame, naming the counter this end expects next.
+    ///
+    /// Sent unprotected for the same reason every other exception can be: it has no
+    /// ciphered tag, and a peer whose counter is wrong is precisely the peer that cannot
+    /// read a frame protected under the counter it is wrong about. It reveals nothing —
+    /// an invocation counter travels in the clear in every protected frame — and it is
+    /// the only thing that lets a restarted device recover without a site visit.
+    #[allow(clippy::unused_self, reason = "a method for symmetry with `exception`, which does use it")]
+    fn counter_exception(&self, expected: u32, out: &mut [u8]) -> Result<usize> {
+        let apdu = Apdu::ExceptionResponse(ExceptionResponse {
+            state_error: StateError::ServiceNotAllowed,
+            service_error: ServiceError::InvocationCounterError,
+            expected_invocation_counter: Some(expected),
+        });
+        let mut w = SliceWriter::new(out);
+        apdu.encode(&mut w)?;
+        Ok(w.written())
+    }
+
     fn exception(
         &mut self,
         state_error: StateError,

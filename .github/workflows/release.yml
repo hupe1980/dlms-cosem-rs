@@ -1,0 +1,157 @@
+# Publish a release to crates.io.
+#
+# Triggered by a version tag, never by a push to a branch: publishing is irreversible —
+# crates.io does not allow a version to be replaced or unpublished — so it must be
+# something somebody did on purpose rather than something a merge can cause.
+#
+# The order matters. Everything that can say "no" runs before anything that cannot be
+# undone: the tag is checked against the manifest, the full suite runs, the package is
+# built and its contents inspected, and only then is the token used.
+#
+# The token lives in the `crates-io` environment rather than in repository secrets, so a
+# workflow on a fork or a pull request cannot reach it, and the environment can require a
+# reviewer. To move to crates.io trusted publishing later, replace the `CARGO_REGISTRY_TOKEN`
+# environment variable with the `rust-lang/crates-io-auth-action` step and add
+# `id-token: write` to the job's permissions — short-lived credentials with nothing stored.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Verify everything and stop before publishing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Nothing here can publish. It exists so that a tag which should not have been pushed
+  # fails in a job that has no credentials at all.
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: the tag and the manifest must agree
+        id: manifest
+        # A tag that says v0.1.0 against a manifest that says 0.0.1 publishes 0.0.1 under
+        # a name nobody will find again. crates.io cannot take that back, so it is checked
+        # here rather than noticed afterwards.
+        run: |
+          set -euo pipefail
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "manifest version: $VERSION"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            if [ "$TAG" != "$VERSION" ]; then
+              echo "::error::tag v$TAG does not match the manifest version $VERSION"
+              exit 1
+            fi
+          fi
+
+      - name: the suite, at every feature set that has to pass
+        run: |
+          set -euo pipefail
+          cargo test --all-features
+          cargo test --no-default-features --features std,client,server,hdlc,wrapper,suite0
+          cargo test --doc --no-default-features --features std,client,server,suite0
+
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo fmt --all --check
+
+      - name: rustdoc, as docs.rs will build it
+        run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings --cfg docsrs
+
+      - name: no panic path reachable from the library
+        # The property the crate leads with. A release that quietly lost it would be
+        # discovered by whoever put it on a microcontroller.
+        run: |
+          set -euo pipefail
+          rustup target add thumbv7em-none-eabihf
+          CARGO_PROFILE_RELEASE_LTO=false cargo build --release \
+            --target thumbv7em-none-eabihf --no-default-features \
+            --features client,server,hdlc,wrapper,p1,suite0,obis-names
+          lib=$(find target/thumbv7em-none-eabihf/release -name 'libdlms_cosem_rs*.rlib' | head -1)
+          if nm "$lib" 2>/dev/null | grep -E 'core[0-9]+panicking|panic_fmt'; then
+            echo "::error::a panic path is reachable from the library"
+            exit 1
+          fi
+          echo "no panic symbols"
+
+      - name: the package builds and carries what it needs
+        # `site/includes/cookbook.md` is included by `lib.rs`, so a packaging list that
+        # dropped it would produce a crate that does not build from the .crate file even
+        # though it builds from the repository.
+        run: |
+          set -euo pipefail
+          cargo package --locked --list
+          cargo package --locked --list | grep -qx 'site/includes/cookbook.md' \
+            || { echo "::error::the packaged crate is missing the cookbook it includes"; exit 1; }
+          cargo package --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crate
+          path: target/package/*.crate
+          if-no-files-found: error
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    # `workflow_dispatch` defaults to a dry run, so the deliberate act is either pushing a
+    # tag or explicitly unticking the box.
+    if: github.ref_type == 'tag' || inputs.dry_run == false
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/dlms_cosem_rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: publish
+        # `--locked` publishes with the committed lockfile, so the crate that goes out is
+        # the one the suite above ran against and not whatever resolved a minute later.
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  github_release:
+    needs: publish
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: crate
+          path: dist
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            dist/*.crate

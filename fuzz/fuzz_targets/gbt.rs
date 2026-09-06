@@ -6,11 +6,17 @@
 //! any last-block flag, and the receiver must gather or refuse each without aborting and
 //! without ever reading outside the buffer it was given.
 //!
-//! The invariant checked here is the one the retry sub-procedure rests on: what a
-//! receiver acknowledges is the length of the run it has actually stored, so a sender
-//! that rewinds to it resumes at the right byte. A receiver that acknowledged a block it
-//! had not stored would leave a hole nothing fills, and the reassembled APDU would be
-//! wrong rather than absent.
+//! The invariant checked here is the one the retry sub-procedure rests on: **a block is
+//! either accepted whole or not at all.** When the receiver advances its run to a block's
+//! number it must have stored exactly that block's payload, and when it does not advance
+//! it must have stored nothing — otherwise a sender that rewinds to the acknowledged
+//! number resumes at the wrong byte, and the reassembled APDU is wrong rather than
+//! absent.
+//!
+//! Note what that is *not*: "acknowledging a block means the buffer grew". A block may
+//! legitimately carry an empty payload, and then the run advances while the length does
+//! not. Stating the invariant the loose way makes it false for a frame a peer is entitled
+//! to send — which is how this assertion first failed.
 
 use dlms_cosem_rs::codec::Decode;
 use dlms_cosem_rs::xdlms::{GbtAction, GbtReceiver, GeneralBlockTransfer};
@@ -19,7 +25,6 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|bytes: &[u8]| {
     let mut storage = [0u8; 4096];
     let mut receiver = GbtReceiver::new(&mut storage);
-    let mut acknowledged = 0u16;
 
     // Split the input into blocks on a marker byte, so one case is a whole transfer.
     for message in bytes.split(|b| *b == 0xFE) {
@@ -28,19 +33,23 @@ fuzz_target!(|bytes: &[u8]| {
         }
         let Ok(block) = GeneralBlockTransfer::from_bytes(message) else { continue };
         let before = receiver.len();
+        let before_ack = receiver.acknowledged();
         match receiver.push(&block) {
             Ok(action) => {
-                let now = receiver.acknowledged();
-                // The run only ever grows, except when a completed APDU is taken and the
-                // next transfer starts over.
-                if now > acknowledged {
-                    assert!(
-                        receiver.len() > before,
-                        "a block was acknowledged without being stored: the sender would \
-                         rewind to a byte that is not there"
+                if receiver.acknowledged() == block.block_number
+                    && receiver.acknowledged() != before_ack
+                {
+                    // Accepted: exactly this block's payload, and nothing else.
+                    assert_eq!(
+                        receiver.len(),
+                        before + block.block_data.len(),
+                        "an accepted block stored the wrong number of bytes"
                     );
+                } else {
+                    // A duplicate, or one from beyond a gap. Storing it would leave a
+                    // hole nothing fills.
+                    assert_eq!(receiver.len(), before, "a block that was not accepted was stored anyway");
                 }
-                acknowledged = now;
                 if action == GbtAction::Complete {
                     assert_eq!(
                         receiver.apdu().len(),
@@ -48,14 +57,12 @@ fuzz_target!(|bytes: &[u8]| {
                         "a completed APDU is exactly what was gathered"
                     );
                     receiver.reset();
-                    acknowledged = 0;
                 }
             }
             Err(_) => {
                 // The only failure is a buffer too small, and it must leave the receiver
                 // usable rather than half-written.
                 receiver.reset();
-                acknowledged = 0;
             }
         }
     }

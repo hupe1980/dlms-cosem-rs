@@ -212,6 +212,32 @@ documents are copyrighted and are **not** redistributed here: this crate contain
 encodings, tag values, class identifiers and OBIS codes, which are facts, and no
 specification prose.
 
+## Examples
+
+Five, and all of them run.
+
+```sh
+cargo run --example association   # a whole ciphered association, no sockets at all
+cargo run --example decode        # hex in, a decoded APDU out — a protocol translator
+cargo run --example p1            # a DSMR telegram from the customer interface
+```
+
+`association` is the crate's central claim made runnable: both engines in one process,
+four-pass high level security, a ciphered read, a breaker operation and a replay that is
+refused — with the entire "transport" being one `copy_from_slice`.
+
+The other two are a pair, over a real socket:
+
+```sh
+cargo run --example meter         # a meter simulator on 127.0.0.1:4059
+cargo run --example read          # read it — or a real meter: `-- 10.0.0.5:4059`
+cargo run --example meter -- --ciphered   # the same pair, protected
+```
+
+`meter` speaks the TCP wrapper, so **any** DLMS client can be pointed at it. That is
+deliberate: the crate's largest gap is that almost every test is this code agreeing with
+itself, and a simulator somebody else's stack can read is what closes it.
+
 ## Documentation
 
 - **[Guides and reference](https://hupe1980.github.io/dlms-cosem-rs/)** — getting started,

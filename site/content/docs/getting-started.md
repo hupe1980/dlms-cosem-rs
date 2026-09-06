@@ -116,6 +116,31 @@ integer and an exponent rather than a float, because 12 345 with a scaler of −
 The full version of this recipe, with the wrapper framing and the stream reassembly
 written out, is in the [cookbook](@/docs/cookbook.md).
 
+## Run something first
+
+Five examples ship with the source, and all of them run:
+
+```sh
+cargo run --example association   # a whole ciphered association, no sockets at all
+cargo run --example decode        # hex in, a decoded APDU out — a protocol translator
+cargo run --example p1            # a DSMR telegram from the customer interface
+```
+
+`association` is this page's argument made runnable: both engines in one process, four
+passes of high level security, a ciphered read, a breaker operation, and a recorded frame
+replayed and refused — with the whole transport being one `copy_from_slice`. Reading it
+takes five minutes and answers most of what "sans-I/O" means in practice.
+
+The other two are a pair over a real socket:
+
+```sh
+cargo run --example meter         # a meter simulator on 127.0.0.1:4059
+cargo run --example read          # read it — or a real meter: `-- 10.0.0.5:4059`
+```
+
+`meter` speaks the TCP wrapper, so any DLMS client can be pointed at it, not only this
+one.
+
 ## What to read next
 
 - **[The cookbook](@/docs/cookbook.md)** — the things people actually do, each one a

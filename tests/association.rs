@@ -354,11 +354,20 @@ fn a_replayed_request_is_refused_by_the_server() {
     }
     assert_eq!(server.store().breaker_operations, 1);
 
-    // The identical bytes, sent again.
+    // The identical bytes, sent again. The frame verifies perfectly — it really was sent
+    // under the real key — so only the invocation counter tells the copy from the
+    // original, and the refusal must say so *by name*: a client told "deciphering error"
+    // learns nothing it can act on and retries the same frame, while one told
+    // "invocation-counter-error" is handed the value to resynchronise to.
     let m = server.handle(&c[..n], &mut s).unwrap();
     match client.handle_response(&s[..m], &mut plain).unwrap() {
         Response::Exception(e) => {
-            assert_eq!(e.service_error, dlms_cosem_rs::xdlms::ServiceError::DecipheringError);
+            assert_eq!(e.service_error, dlms_cosem_rs::xdlms::ServiceError::InvocationCounterError);
+            assert_eq!(
+                e.expected_invocation_counter,
+                server.peer_invocation_counter().map(|c| c + 1),
+                "and carries the counter the server will accept next"
+            );
         }
         other => panic!("a replayed request must be refused, got {other:?}"),
     }
@@ -381,7 +390,7 @@ fn a_replayed_response_is_refused_by_the_client() {
     // The same response bytes again — a stale reading dressed as a fresh one.
     assert_eq!(
         client.handle_response(&s[..m], &mut plain).unwrap_err().kind,
-        ErrorKind::BadTag,
+        ErrorKind::Replay,
         "a replayed response must not be reported as a current value"
     );
 }
@@ -1894,4 +1903,55 @@ fn a_store_that_reports_success_without_writing_is_refused_rather_than_malformed
         other => panic!("expected one outcome per method, got {other:?}"),
     }
     assert!(!server.store().breaker_closed);
+}
+
+/// A device whose counter went backwards can recover, and the exchange tells it how.
+///
+/// This is the whole point of `invocation-counter-error` carrying a value. A meter that
+/// restarted from stale storage — or a head-end that lost its own record — sends a
+/// counter the peer has already seen. Told only "deciphering error" it retries the same
+/// frame forever and needs a site visit; told the value expected next it can move its
+/// counter forward **deliberately** and carry on.
+///
+/// Deliberately is the operative word: the crate never resynchronises on its own, because
+/// an exception response is unprotected and anyone can forge one. Moving a counter is the
+/// caller's decision, and moving it *backwards* is what burns a key.
+#[test]
+fn a_client_whose_counter_went_backwards_can_resynchronise_from_the_refusal() {
+    let (mut client, mut server) = ciphered_pair();
+    assert_eq!(associate(&mut client, &mut server), AssociationStep::Established);
+
+    let mut c = [0u8; 512];
+    let mut s = [0u8; 512];
+    let mut plain = [0u8; 512];
+
+    // A few genuine reads, so the server's window has moved on.
+    for _ in 0..3 {
+        let n = client.get_request(AttributeDescriptor::new(3, ENERGY, 2), None, &mut c).unwrap();
+        let m = server.handle(&c[..n], &mut s).unwrap();
+        assert!(matches!(client.handle_response(&s[..m], &mut plain).unwrap(), Response::Data(_)));
+    }
+
+    // Now the client restarts from a stale value — the failure mode the API is shaped to
+    // make visible, here forced on purpose.
+    client.set_invocation_counter(1);
+    let n = client.get_request(AttributeDescriptor::new(3, ENERGY, 2), None, &mut c).unwrap();
+    let m = server.handle(&c[..n], &mut s).unwrap();
+
+    let expected = match client.handle_response(&s[..m], &mut plain).unwrap() {
+        Response::Exception(e) => {
+            assert_eq!(e.service_error, dlms_cosem_rs::xdlms::ServiceError::InvocationCounterError);
+            e.expected_invocation_counter.expect("the refusal names the value to move to")
+        }
+        other => panic!("expected a counter error, got {other:?}"),
+    };
+
+    // Acting on it is the caller's choice, and one call.
+    client.set_invocation_counter(expected);
+    let n = client.get_request(AttributeDescriptor::new(3, ENERGY, 2), None, &mut c).unwrap();
+    let m = server.handle(&c[..n], &mut s).unwrap();
+    match client.handle_response(&s[..m], &mut plain).unwrap() {
+        Response::Data(v) => assert_eq!(v.as_u64(), Some(12_345_678)),
+        other => panic!("the association must be usable again, got {other:?}"),
+    }
 }

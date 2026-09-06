@@ -141,14 +141,14 @@ fn a_replayed_push_is_refused_once_a_counter_has_been_seen() {
     // The same frame again.
     assert_eq!(
         listener.handle(&first[..n1], &mut buf).unwrap_err().kind,
-        ErrorKind::BadTag,
+        ErrorKind::Replay,
         "a repeated invocation counter is a replay"
     );
 
     // An older one.
     let mut older = [0u8; 256];
     let n2 = push_frame(4, &mut older);
-    assert_eq!(listener.handle(&older[..n2], &mut buf).unwrap_err().kind, ErrorKind::BadTag);
+    assert_eq!(listener.handle(&older[..n2], &mut buf).unwrap_err().kind, ErrorKind::Replay);
 
     // A newer one is fine.
     let mut newer = [0u8; 256];
@@ -370,9 +370,10 @@ fn a_sender_and_a_listener_agree_about_a_pushed_reading() {
     let fields = push.body.as_structure().unwrap();
     assert_eq!(fields.get(1).unwrap().as_u64(), Some(7_654_321));
 
-    // The same frame again is a replay, whatever it decrypts to.
+    // The same frame again is a replay, whatever it decrypts to — and it is named as
+    // one rather than as a bad tag, because it verified: it is simply not new.
     let mut scratch = [0u8; 256];
-    assert_eq!(listener.handle(&frame[..m], &mut scratch).unwrap_err().kind, ErrorKind::BadTag);
+    assert_eq!(listener.handle(&frame[..m], &mut scratch).unwrap_err().kind, ErrorKind::Replay);
 
     // And the next push spends the next counter, so the listener accepts it.
     let m = sender.notify(Some(captured), &value, &mut frame).unwrap();

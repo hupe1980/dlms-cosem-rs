@@ -48,6 +48,16 @@ pub enum ErrorKind {
     BadChecksum,
     /// An authentication tag did not verify, or a signature did not verify.
     BadTag,
+    /// An invocation counter that has already been accepted, or is too old to prove
+    /// anything about.
+    ///
+    /// Distinct from [`ErrorKind::BadTag`] because the two are different events. A bad
+    /// tag is a forgery or the wrong key; a replay is a message that really was sent
+    /// under the real key, and is most often a retransmission or a peer that restarted
+    /// from a stale counter. The standard has a service error for exactly this —
+    /// `invocation-counter-error`, which carries the value the receiver expects next — and
+    /// a server cannot send it without being able to tell the two apart.
+    Replay,
     /// The peer's message is well formed but not allowed in this state.
     UnexpectedMessage,
     /// A field is longer than this build can represent without `alloc`.
@@ -66,6 +76,7 @@ impl fmt::Display for ErrorKind {
             Self::BufferTooSmall { needed } => write!(f, "buffer too small, needed {needed}"),
             Self::BadChecksum => f.write_str("checksum mismatch"),
             Self::BadTag => f.write_str("authentication tag mismatch"),
+            Self::Replay => f.write_str("invocation counter already accepted, or too old"),
             Self::UnexpectedMessage => f.write_str("message not allowed in this state"),
             Self::Unsupported => f.write_str("not supported in this build"),
         }

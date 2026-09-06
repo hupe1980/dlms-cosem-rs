@@ -25,6 +25,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
       - run: cargo test --no-default-features --features std,client,server,hdlc,wrapper,suite0
+      - name: the examples run, not only compile
+        # An example that compiles and has not been run since the API moved under it is
+        # documentation that lies. These three need no network; the TCP pair
+        # (`meter`/`read`) is driven against each other below.
+        run: |
+          set -euo pipefail
+          cargo run --all-features --example association
+          cargo run --all-features --example decode
+          cargo run --all-features --example p1 < /dev/null
+
+      - name: the TCP pair talks to itself
+        # The simulator and the client, over a real socket on the loopback address, both
+        # plain and ciphered. This is the closest thing to an interoperability test the
+        # repository has on its own — it is still this crate on both ends, and it is still
+        # worth running, because it exercises the wrapper framing and the stream
+        # reassembly that the in-process example skips entirely.
+        run: |
+          set -euo pipefail
+          for mode in "" "--ciphered"; do
+            cargo run --all-features --example meter -- $mode &
+            METER=$!
+            for _ in $(seq 1 30); do
+              if bash -c 'exec 3<>/dev/tcp/127.0.0.1/4059' 2>/dev/null; then break; fi
+              sleep 0.5
+            done
+            cargo run --all-features --example read -- $mode
+            kill "$METER" 2>/dev/null || true
+            wait "$METER" 2>/dev/null || true
+          done
+
       - name: the front-page example compiles at its feature floor
         # `README.md` is the crate-level documentation and is included unconditionally, so
         # its example has to compile for every reader rather than only for one who took

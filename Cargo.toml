@@ -16,6 +16,7 @@ categories = ["embedded", "encoding", "network-programming", "no-std"]
 # published crate.
 include = [
     "/src",
+    "/examples",
     "/README.md",
     "/LICENSE-MIT",
     "/LICENSE-APACHE",
@@ -80,3 +81,32 @@ rustdoc-args = ["--cfg", "docsrs"]
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# Each example declares what it needs, so `cargo test` with a reduced feature set does
+# not try to build one that cannot compile. Without this the examples would quietly
+# decide the crate's minimum feature set for everybody.
+
+[[example]]
+name = "association"                  # a whole ciphered association, no I/O at all
+path = "examples/association.rs"
+required-features = ["std", "client", "server", "suite0"]
+
+[[example]]
+name = "decode"                       # hex in, a decoded APDU out
+path = "examples/decode.rs"
+required-features = ["std"]
+
+[[example]]
+name = "p1"                           # a DSMR/eMUCs telegram from the customer interface
+path = "examples/p1.rs"
+required-features = ["std", "p1"]
+
+[[example]]
+name = "meter"                        # a meter simulator over the TCP wrapper
+path = "examples/meter.rs"
+required-features = ["std", "server", "wrapper", "suite0"]
+
+[[example]]
+name = "read"                         # a client for it, or for a real meter
+path = "examples/read.rs"
+required-features = ["std", "client", "wrapper", "suite0"]

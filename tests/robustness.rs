@@ -369,16 +369,20 @@ fn an_hdlc_header_cannot_reach_past_its_own_frame() {
 ///
 /// A decoder test proves one block cannot crash the parser; this proves the *procedure*
 /// cannot. Blocks arrive in any order, repeated, from beyond a gap, with any window and
-/// any last-block flag, and the receiver must gather or refuse each one without
-/// aborting.
+/// any last-block flag, and the receiver must gather or refuse each one without aborting.
 ///
-/// The invariant is the one the retry sub-procedure rests on: what a receiver
-/// acknowledges is the length of the run it has actually stored. A receiver that
-/// acknowledged a block it had not stored would send a rewinding sender to the wrong
-/// byte, and the reassembled APDU would be wrong rather than absent — the failure with
-/// no error attached to it.
+/// The invariant is the one the retry sub-procedure rests on: **a block is either
+/// accepted whole or not at all.** When the receiver advances its run to a block's number
+/// it stored exactly that block's payload; when it does not advance, it stored nothing.
+/// A receiver that got this wrong would send a rewinding sender to the wrong byte, and
+/// the reassembled APDU would be wrong rather than absent — the failure with no error
+/// attached to it.
+///
+/// Note what the invariant is *not*: "acknowledging a block means the buffer grew". A
+/// block may carry an empty payload, and then the run advances while the length does not.
+/// The loose phrasing is false for a frame a peer is entitled to send.
 #[test]
-fn the_general_block_transfer_receiver_never_acknowledges_what_it_did_not_store() {
+fn a_general_block_transfer_block_is_accepted_whole_or_not_at_all() {
     use dlms_cosem_rs::xdlms::{BlockControl, GbtAction, GbtReceiver, GeneralBlockTransfer};
 
     let mut rng = Rng(0x6B7_0F1E_2D3C_4B5A);
@@ -392,16 +396,26 @@ fn the_general_block_transfer_receiver_never_acknowledges_what_it_did_not_store(
             control,
             block_number: (rng.below(8) + 1) as u16,
             block_number_ack: rng.below(8) as u16,
+            // Zero-length payloads included on purpose: they are the case that made the
+            // looser version of this assertion false.
             block_data: &payload[..rng.below(payload.len() + 1)],
         };
         let before_len = receiver.len();
         let before_ack = receiver.acknowledged();
         match receiver.push(&block) {
             Ok(action) => {
-                if receiver.acknowledged() > before_ack {
-                    assert!(
-                        receiver.len() > before_len,
-                        "block {} was acknowledged without being stored",
+                if receiver.acknowledged() == block.block_number && receiver.acknowledged() != before_ack {
+                    assert_eq!(
+                        receiver.len(),
+                        before_len + block.block_data.len(),
+                        "block {} was accepted but stored the wrong number of bytes",
+                        block.block_number
+                    );
+                } else {
+                    assert_eq!(
+                        receiver.len(),
+                        before_len,
+                        "block {} was not accepted and was stored anyway",
                         block.block_number
                     );
                 }
@@ -413,4 +427,31 @@ fn the_general_block_transfer_receiver_never_acknowledges_what_it_did_not_store(
             Err(_) => receiver.reset(),
         }
     }
+}
+
+/// The case `cargo fuzz` found: an in-order block with an **empty** payload.
+///
+/// It is a legitimate frame — the run advances, no bytes are stored — and it is kept here
+/// as a regression because the fuzzer only reaches it on a nightly toolchain with time to
+/// spend, while this runs on stable on every commit.
+#[test]
+fn a_block_with_an_empty_payload_advances_the_run_without_storing_anything() {
+    use dlms_cosem_rs::codec::Decode;
+    use dlms_cosem_rs::xdlms::{GbtAction, GbtReceiver, GeneralBlockTransfer};
+
+    // control 0x00, block 1, ack 0, zero-length data.
+    let block = GeneralBlockTransfer::from_bytes(&[0x00, 0x00, 0x01, 0x00, 0x00, 0x00]).unwrap();
+    assert!(block.block_data.is_empty());
+
+    let mut storage = [0u8; 64];
+    let mut receiver = GbtReceiver::new(&mut storage);
+    assert_eq!(receiver.push(&block).unwrap(), GbtAction::Acknowledge);
+    assert_eq!(receiver.acknowledged(), 1, "the run reaches block one");
+    assert_eq!(receiver.len(), 0, "and no bytes were stored, because none were sent");
+
+    // The transfer continues from there exactly as if the empty block had carried data.
+    // control 0x80 (last block), block 2, ack 0, two bytes of data.
+    let two = GeneralBlockTransfer::from_bytes(&[0x80, 0x00, 0x02, 0x00, 0x00, 0x02, 0xAB, 0xCD]).unwrap();
+    assert_eq!(receiver.push(&two).unwrap(), GbtAction::Complete);
+    assert_eq!(receiver.apdu(), [0xAB, 0xCD]);
 }
