@@ -198,6 +198,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         AssociationStep::Rejected { result, diagnostic } => {
             return Err(format!("refused: {result:?} / {diagnostic:?}").into());
         }
+        AssociationStep::Exception(e) => {
+            return Err(format!("the meter refused the AARQ outright: {e:?}").into());
+        }
     }
     println!("  association open, ciphered, mutually authenticated\n");
 

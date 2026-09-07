@@ -90,11 +90,11 @@
       <tr><td><code>codec</code></td><td>A bounds-checked cursor. Every error carries the <strong>byte offset</strong> it happened at.</td></tr>
       <tr><td><code>axdr</code></td><td><code>Data</code> borrowed from the input, so a load profile decodes without allocating. Compact arrays, delta types, COSEM date-times with their wildcards intact.</td></tr>
       <tr><td><code>ber</code>, <code>acse</code></td><td>AARQ / AARE / RLRQ / RLRE: application context, authentication mechanism, system titles, conformance.</td></tr>
-      <tr><td><code>xdlms</code></td><td>Every APDU tag. GET / SET / ACTION / ACCESS, block transfer, general block transfer with its streaming window and retry, push, exceptions, the four protection wrappers.</td></tr>
+      <tr><td><code>xdlms</code></td><td>Every APDU tag. GET / SET / ACTION / ACCESS, block transfer, general block transfer with its streaming window and retry, push, exceptions, the four protection wrappers — and short-name Read / Write behind the <code>sn</code> feature.</td></tr>
       <tr><td><code>security</code></td><td>Suites 0–2 at both key widths, <code>glo-</code>/<code>ded-</code>/general ciphering, HLS-GMAC, invocation counters with a real replay window, AES key wrap — behind a swappable provider.</td></tr>
       <tr><td><code>cosem</code></td><td>{{ config.extra.class_count }} interface classes as a registry, OBIS, access rights in both shapes, profile buffers with every compression undone.</td></tr>
       <tr><td><code>transport</code></td><td>HDLC with a resynchronising frame finder, segmentation and a link machine; the TCP/UDP wrapper; the P1 customer interface.</td></tr>
-      <tr><td><code>client</code>, <code>server</code></td><td>Sans-I/O state machines with block transfer both ways, every batched service, and both halves of push.</td></tr>
+      <tr><td><code>client</code>, <code>server</code></td><td>Sans-I/O state machines with block transfer both ways, every batched service, both referencing modes, and both halves of push.</td></tr>
     </tbody>
   </table>
   </div>

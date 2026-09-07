@@ -12,11 +12,11 @@ pub use push::{PushDestination, PushSender, check_body_fits};
 pub use store::{AuditEvent, ObjectStore, StoreResult};
 
 use crate::acse::{
-    Aare, Aarq, ApplicationContext, AssociationResult, AuthMechanism, Diagnostic, Rlre, Rlrq, UserDiagnostic,
+    Aare, Aarq, ApplicationContext, AssociationResult, AuthMechanism, Diagnostic, Referencing, Rlre, Rlrq,
+    UserDiagnostic,
 };
 use crate::axdr::Data;
 use crate::codec::{Decode, Encode, Error, ErrorKind, Reader, Result, SliceWriter, Writer};
-use crate::cosem::AttributeAccess;
 use crate::obis::Obis;
 use crate::security::wrap::{Incoming, Outgoing, protect_apdu, unprotect_apdu};
 use crate::security::{
@@ -125,6 +125,9 @@ enum Outbound {
     Get,
     /// `action-response-with-pblock`.
     Action,
+    /// A short-name `read-response` whose single result is a `data-block-result`.
+    #[cfg(feature = "sn")]
+    Read,
 }
 
 /// What the server is.
@@ -138,6 +141,13 @@ pub struct ServerConfig {
     pub password: Option<crate::security::Secret>,
     /// What protection the server applies and demands.
     pub security: SecurityPolicy,
+    /// How this server addresses objects.
+    ///
+    /// Decided by the application context the client proposes, and a client that
+    /// proposes the other one is refused — a meter serves one or the other, and
+    /// answering short names to a logical-name association would be answering a
+    /// different question.
+    pub referencing: Referencing,
     /// The largest APDU the server will accept.
     pub max_pdu_size: u16,
     /// What the server can do.
@@ -165,6 +175,7 @@ impl Default for ServerConfig {
             mechanism: AuthMechanism::None,
             password: None,
             security: SecurityPolicy::NONE,
+            referencing: Referencing::LogicalName,
             max_pdu_size: 1024,
             conformance: Conformance::SERVER_DEFAULT,
             challenge_len: 16,
@@ -219,6 +230,16 @@ pub struct Server<S, P, const N: usize = 1024> {
     invocation_counter: InvocationCounter,
     /// Which of the client's invocation counters have already been spent.
     peer_replay: ReplayWindow,
+    /// Whose counters `peer_replay` describes.
+    ///
+    /// The window outlives the association, and this is what makes that safe. A client
+    /// that reconnects keeps its own counter across the gap, so throwing the window away
+    /// with the association would let everything recorded from the previous connection
+    /// be replayed into the next one — and an AARQ is unauthenticated, so an on-path
+    /// attacker can cause that gap at will. A window is therefore started fresh only
+    /// when the calling system title changes, which is the one case where the counters
+    /// genuinely belong to a different sender.
+    replay_owner: Option<SystemTitle>,
     negotiated: Conformance,
     ciphered_association: bool,
     /// The largest APDU the client said it can receive, once it has said so.
@@ -252,6 +273,7 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
             server_challenge_len: 0,
             invocation_counter,
             peer_replay,
+            replay_owner: None,
             negotiated: Conformance::empty(),
             ciphered_association: false,
             client_max_pdu_size,
@@ -290,12 +312,27 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
     /// `Server` across connections must call this, or the next client inherits the
     /// previous one's dedicated key, negotiated conformance and challenge.
     ///
-    /// What is deliberately **not** reset is the invocation counter: it must never go
-    /// backwards, because a repeated GCM nonce is a key-recovery event and the key is
-    /// the same key. The peer's replay window is cleared, because it belongs to the
-    /// peer's counter and the next client is a different peer.
+    /// Two things are deliberately **not** reset. The invocation counter must never go
+    /// backwards, because a repeated GCM nonce is a key-recovery event and the key has
+    /// not changed. And the peer's replay window survives too: a client that reconnects
+    /// carries its own counter across the gap, so discarding the window here would make
+    /// every frame recorded from the previous connection replayable into the next one.
+    /// It is started fresh when a *different* system title associates
+    /// ([`Server::replay_owner`]).
     pub fn reset(&mut self) {
         self.state = ServerState::Idle;
+        self.clear_association();
+        self.scratch = [0; N];
+        self.store.audit(AuditEvent::Released);
+    }
+
+    /// Forget everything scoped to one association, keeping what outlives it.
+    ///
+    /// Called by [`Server::reset`] and by the arrival of a new AARQ, which is the other
+    /// way one association replaces another: a client may re-associate on an open link
+    /// without releasing first, and the second association must not inherit the first
+    /// one's dedicated key, challenge, negotiated conformance or half-finished transfer.
+    fn clear_association(&mut self) {
         self.client_system_title = None;
         self.client_challenge = [0; 64];
         self.client_challenge_len = 0;
@@ -304,12 +341,28 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         self.negotiated = Conformance::empty();
         self.ciphered_association = false;
         self.client_max_pdu_size = self.config.max_pdu_size;
-        self.peer_replay = ReplayWindow::new(self.config.replay_window);
         self.protector.provider_mut().clear_dedicated_key();
         self.protector.set_dedicated(false);
         self.transfer = Transfer::Idle;
-        self.scratch = [0; N];
-        self.store.audit(AuditEvent::Released);
+    }
+
+    /// Whose invocation counters the replay window currently describes.
+    ///
+    /// Persist it alongside [`ReplayWindow::highest`] if the window is to survive a
+    /// restart; restore with [`Server::resume_replay_window`].
+    #[must_use]
+    pub const fn replay_owner(&self) -> Option<SystemTitle> {
+        self.replay_owner
+    }
+
+    /// Restore a peer's replay window from storage.
+    ///
+    /// Without this a server that restarts accepts every frame it has ever seen from
+    /// that peer a second time — the counter is the only thing that distinguishes a
+    /// recording from the real message.
+    pub fn resume_replay_window(&mut self, peer: SystemTitle, highest: u32) {
+        self.replay_owner = Some(peer);
+        self.peer_replay = ReplayWindow::resumed(highest, self.config.replay_window);
     }
 
     /// True while a value is being delivered or received block by block.
@@ -402,6 +455,14 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
             Apdu::SetRequest(req) => self.handle_set(req, out),
             Apdu::ActionRequest(req) => self.handle_action(req, out),
             Apdu::AccessRequest(req) => self.handle_access(&req, out),
+            #[cfg(feature = "sn")]
+            Apdu::ReadRequest(req) => self.handle_read(&req, out),
+            #[cfg(feature = "sn")]
+            Apdu::WriteRequest(req) => self.handle_write(&req.specification, &req.values, true, out),
+            #[cfg(feature = "sn")]
+            Apdu::UnconfirmedWriteRequest(req) => {
+                self.handle_write(&req.specification, &req.values, false, out)
+            }
             _ => self.exception(StateError::ServiceUnknown, ServiceError::ServiceNotSupported, out),
         }
     }
@@ -412,10 +473,19 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
     )]
     fn handle_aarq(&mut self, apdu: &[u8], out: &mut [u8]) -> Result<usize> {
         let aarq = Aarq::from_bytes(apdu)?;
+        // A client may open a second association on a link it never released — and a
+        // sans-I/O engine cannot see a dropped connection either. Whatever the first
+        // association negotiated goes now, so the second cannot inherit its dedicated
+        // key and answer in `ded-` tags a client that never asked for one.
+        self.clear_association();
         let context = aarq.application_context.unwrap_or(ApplicationContext::LogicalName);
         self.ciphered_association = context.is_ciphered();
 
-        if !context.is_logical_name() {
+        // A build that left the `sn` feature out has no short-name services at all, so an
+        // association in that context would open and then answer every request
+        // `service-not-supported`. Refusing at the handshake says so once, in the message
+        // whose job is to say what an association can do.
+        if context.referencing() != self.config.referencing || !serves(self.config.referencing) {
             return self.refuse(
                 AssociationResult::RejectedPermanent,
                 UserDiagnostic::ApplicationContextNameNotSupported,
@@ -441,7 +511,16 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         }
 
         if let Some(title) = aarq.calling_ap_title {
-            self.client_system_title = Some(SystemTitle::from_slice(title)?);
+            let title = SystemTitle::from_slice(title)?;
+            self.client_system_title = Some(title);
+            // The replay window belongs to a *peer*, not to an association. A different
+            // peer's counters say nothing about this one's, so that is the one event
+            // that starts a fresh window; the same peer reconnecting keeps its own, so a
+            // frame recorded from its previous association is still a replay.
+            if self.replay_owner != Some(title) {
+                self.replay_owner = Some(title);
+                self.peer_replay = ReplayWindow::new(self.config.replay_window);
+            }
         }
 
         // Low level security is decided here and now; high level security needs two
@@ -463,7 +542,32 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         let mut client_max = self.config.max_pdu_size;
         if let Some(user_info) = aarq.user_information {
             let mut buf = [0u8; 256];
-            let plain = self.unprotect_initiate(user_info, &mut buf)?;
+            // The InitiateRequest is the first thing a ciphered association protects, so
+            // it is also the first thing a stale invocation counter breaks — and the
+            // commonest cause of a stale counter is a client that restarted. Answering
+            // that with a transport error leaves the caller inventing a reply and the
+            // client with no way to resynchronise, so it gets the code the standard has
+            // for it, carrying the value this end expects next (D47). Anything else that
+            // fails to unprotect is a wrong key or a forgery, and that is a refusal the
+            // client can read.
+            let plain = match self.unprotect_initiate(user_info, &mut buf) {
+                Ok(p) => p,
+                Err(e) if e.kind == ErrorKind::Replay => {
+                    let expected = self.peer_replay.expected_next();
+                    self.state = ServerState::Idle;
+                    self.store.audit(AuditEvent::AssociationRefused {
+                        diagnostic: UserDiagnostic::AuthenticationFailure,
+                    });
+                    return self.counter_exception(expected, out);
+                }
+                Err(_) => {
+                    return self.refuse(
+                        AssociationResult::RejectedPermanent,
+                        UserDiagnostic::AuthenticationFailure,
+                        out,
+                    );
+                }
+            };
             let mut r = Reader::new(plain);
             let tag = r.u8()?;
             if ApduTag::from_u8(tag) == Some(ApduTag::InitiateRequest) {
@@ -472,14 +576,29 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
                 client_max = init.client_max_receive_pdu_size;
                 if let Some(dedicated) = init.dedicated_key {
                     // A dedicated key is not a preference the server configured — it is
-                    // the client's decision, taken in this message. Both ends must
-                    // switch or nothing after it decrypts, so the protector follows the
-                    // key rather than the configuration. A provider that cannot hold one
-                    // says so, and the association stays on the global key set.
+                    // the client's decision, taken in this message. Both ends must switch
+                    // or nothing after it decrypts, so the protector follows the key
+                    // rather than the configuration.
+                    //
+                    // A provider that cannot hold one therefore cannot serve this
+                    // association at all, and it is refused here. Carrying on with the
+                    // global key set reads like graceful degradation and is not: the
+                    // client has already switched to `ded-` tags, so every message
+                    // afterwards fails its tag with nothing to point at — and a client
+                    // that asked for a key of its own and silently got the long-lived
+                    // one had a security expectation quietly dropped.
                     let key = crate::security::Key::from_slice(dedicated)?;
-                    if self.protector.provider_mut().set_dedicated_key(key).is_ok() {
-                        self.protector.set_dedicated(true);
+                    if self.protector.provider_mut().set_dedicated_key(key).is_err() {
+                        // There is no ACSE diagnostic for "cannot hold a dedicated key",
+                        // so the refusal is generic; the audit trail is where the reason
+                        // is recorded.
+                        return self.refuse(
+                            AssociationResult::RejectedPermanent,
+                            UserDiagnostic::NoReasonGiven,
+                            out,
+                        );
                     }
+                    self.protector.set_dedicated(true);
                 }
             }
         }
@@ -517,6 +636,10 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         let response = InitiateResponse {
             negotiated_conformance: self.negotiated,
             server_max_receive_pdu_size: self.config.max_pdu_size,
+            // The variable-access-specification name a client reads the referencing mode
+            // back from: 0x0007 for logical names, and the current association object's
+            // own base name for short ones.
+            vaa_name: vaa_name(self.config.referencing),
             ..Default::default()
         };
         let mut plain = [0u8; 64];
@@ -731,18 +854,20 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         }
         let n = rw.written();
 
-        // The count prefix belongs to the list, so it is part of what gets blocked.
-        let mut body = [0u8; N];
-        let mut bw = SliceWriter::new(&mut body);
-        bw.write_length(count)?;
-        bw.write_bytes(&results[..n])?;
-        let body_len = bw.written();
+        // The count prefix belongs to the list, so it is part of what gets blocked. Only
+        // the prefix is built separately: a second `N`-sized buffer here would be a
+        // fourth kilobyte of stack for the sake of five bytes (R21).
+        let mut prefix = [0u8; 5];
+        let mut pw = SliceWriter::new(&mut prefix);
+        pw.write_length(count)?;
+        let prefix_len = pw.written();
+        let body_len = prefix_len.saturating_add(n);
 
         if body_len + NORMAL_HEADER_MAX + self.protection_overhead() <= usize::from(self.client_max_pdu_size)
         {
             let response = GetResponse::WithList {
                 invoke_id,
-                results: crate::xdlms::List::from_raw(count, &results[..n]),
+                results: crate::xdlms::List::from_raw(count, results.get(..n).unwrap_or(&[])),
             };
             return self.send(&Apdu::GetResponse(response), out);
         }
@@ -752,10 +877,15 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         }
         // A blocked response carries the encoded body of whichever response form it is,
         // so what goes into the blocks here is the list, count prefix included.
+        let too_small = || Error::new(ErrorKind::BufferTooSmall { needed: body_len }, 0);
         self.response
-            .get_mut(..body_len)
-            .ok_or(Error::new(ErrorKind::BufferTooSmall { needed: body_len }, 0))?
-            .copy_from_slice(body.get(..body_len).unwrap_or(&[]));
+            .get_mut(..prefix_len)
+            .ok_or_else(too_small)?
+            .copy_from_slice(prefix.get(..prefix_len).unwrap_or(&[]));
+        self.response
+            .get_mut(prefix_len..body_len)
+            .ok_or_else(too_small)?
+            .copy_from_slice(results.get(..n).unwrap_or(&[]));
         self.transfer =
             Transfer::Sending { invoke_id, service: Outbound::Get, len: body_len, sent: 0, block: 0 };
         self.send_next_block(out)
@@ -804,6 +934,8 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
             return match service {
                 Outbound::Get => self.get_error(invoke_id, DataAccessResult::LongGetAborted, out),
                 Outbound::Action => self.action_error(invoke_id, ActionResult::LongActionAborted, out),
+                #[cfg(feature = "sn")]
+                Outbound::Read => self.read_error(DataAccessResult::LongGetAborted, out),
             };
         }
         let end = sent.saturating_add(max).min(len);
@@ -823,6 +955,27 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         let last_block = end == len;
         let number = block.saturating_add(1);
         let n = match service {
+            #[cfg(feature = "sn")]
+            Outbound::Read => {
+                // A blocked short-name read answers with a list of exactly one result,
+                // and that result is a `data-block-result`. `List::encode` writes the
+                // count prefix, so only the element is built here.
+                let result = crate::xdlms::ReadResult::Block {
+                    last_block,
+                    // Short-name block numbers are sixteen bits, not thirty-two.
+                    block_number: u16::try_from(number)
+                        .map_err(|_| Error::new(ErrorKind::InvalidLength, 0))?,
+                    raw_data: payload,
+                };
+                let mut element = [0u8; N];
+                let mut ew = SliceWriter::new(&mut element);
+                result.encode(&mut ew)?;
+                let len = ew.written();
+                let response = crate::xdlms::ReadResponse {
+                    results: List::from_raw(1, element.get(..len).unwrap_or(&[])),
+                };
+                self.send(&Apdu::ReadResponse(response), out)?
+            }
             Outbound::Get => {
                 let response = GetResponse::WithDataBlock {
                     invoke_id,
@@ -863,6 +1016,8 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         let required = match service {
             Outbound::Get => Conformance::BLOCK_TRANSFER_WITH_GET_OR_READ,
             Outbound::Action => Conformance::BLOCK_TRANSFER_WITH_ACTION,
+            #[cfg(feature = "sn")]
+            Outbound::Read => Conformance::BLOCK_TRANSFER_WITH_GET_OR_READ,
         };
         if self.negotiated.require(required).is_err() {
             // The value exists and the client may read it; there is simply no way to
@@ -871,6 +1026,8 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
             return match service {
                 Outbound::Get => self.get_error(invoke_id, DataAccessResult::DataBlockUnavailable, out),
                 Outbound::Action => self.action_error(invoke_id, ActionResult::DataBlockUnavailable, out),
+                #[cfg(feature = "sn")]
+                Outbound::Read => self.read_error(DataAccessResult::DataBlockUnavailable, out),
             };
         }
         self.transfer = Transfer::Sending { invoke_id, service, len, sent: 0, block: 0 };
@@ -1657,6 +1814,274 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
         AccessResponseSpecification::Get(outcome)
     }
 
+    /// Read attributes by short name.
+    ///
+    /// One result per entry, in order, exactly as the batched logical-name read works —
+    /// the two services differ in how a target is *named*, not in what a read is.
+    ///
+    /// A value too large for the negotiated PDU size is delivered by block transfer, and
+    /// the short-name form of that is a `data-block-result` inside the read response,
+    /// continued by a `block-number-access` entry rather than by a service of its own.
+    /// A blocked read is therefore only meaningful for a request of exactly one entry:
+    /// a response carrying one fragment cannot say which of several entries it belongs
+    /// to, so a multi-entry request whose answers do not fit is refused per entry rather
+    /// than silently truncated.
+    #[cfg(feature = "sn")]
+    fn handle_read(&mut self, req: &crate::xdlms::ReadRequest<'_>, out: &mut [u8]) -> Result<usize> {
+        use crate::xdlms::{ReadResult, VariableAccess};
+
+        if self.state != ServerState::Associated {
+            return self.exception(StateError::ServiceNotAllowed, ServiceError::OperationNotPossible, out);
+        }
+        if self.negotiated.require(Conformance::READ).is_err() {
+            return self.exception(StateError::ServiceUnknown, ServiceError::ServiceNotSupported, out);
+        }
+        let count = req.specification.len();
+        if count == 0 || count > MAX_ACCESS_ITEMS {
+            return self.exception(StateError::ServiceNotAllowed, ServiceError::OperationNotPossible, out);
+        }
+
+        // A `block-number-access` entry continues a transfer rather than starting one,
+        // so it is answered before anything else is touched.
+        if count == 1 {
+            if let Some(Ok(VariableAccess::BlockNumber(acked))) = req.specification.iter().next() {
+                return self.continue_read_block(acked, out);
+            }
+        }
+        self.transfer = Transfer::Idle;
+
+        let mut results = [0u8; N];
+        let mut rw = SliceWriter::new(&mut results);
+        let mut written = 0usize;
+        for entry in req.specification.iter() {
+            let entry = entry?;
+            let before = rw.written();
+            rw.write_u8(0)?;
+            let value_at = rw.written();
+            let outcome = self.read_one(&entry, &mut rw);
+            match outcome {
+                // Success with nothing written is the store's contract broken, and
+                // inside a positional list it would shift every later answer onto the
+                // wrong entry.
+                Ok(()) if rw.written() == value_at => {
+                    rw.truncate(before)?;
+                    ReadResult::Error(DataAccessResult::OtherReason).encode(&mut rw)?;
+                }
+                Ok(()) => {}
+                Err(e) => {
+                    rw.truncate(before)?;
+                    ReadResult::Error(e).encode(&mut rw)?;
+                }
+            }
+            written += 1;
+        }
+        let n = rw.written();
+
+        // The count prefix belongs to the list, as it does for every other blocked body.
+        let mut prefix = [0u8; 5];
+        let mut pw = SliceWriter::new(&mut prefix);
+        pw.write_length(written)?;
+        let prefix_len = pw.written();
+        let body_len = prefix_len.saturating_add(n);
+
+        if body_len + NORMAL_HEADER_MAX + self.protection_overhead() <= usize::from(self.client_max_pdu_size)
+        {
+            let response = crate::xdlms::ReadResponse {
+                results: List::from_raw(written, results.get(..n).unwrap_or(&[])),
+            };
+            return self.send(&Apdu::ReadResponse(response), out);
+        }
+
+        // Too large. Only a single-entry read can be blocked, because a fragment carries
+        // no entry number and a client could not attribute it.
+        if written != 1 || self.negotiated.require(Conformance::BLOCK_TRANSFER_WITH_GET_OR_READ).is_err() {
+            return self.read_error(DataAccessResult::DataBlockUnavailable, out);
+        }
+        // The blocks carry the *value*, not the list: a `data-block-result` is one
+        // entry's answer, so the count prefix and the choice byte stay out of it.
+        let value = results.get(1..n).unwrap_or(&[]);
+        let value_len = value.len();
+        self.response
+            .get_mut(..value_len)
+            .ok_or(Error::new(ErrorKind::BufferTooSmall { needed: value_len }, 0))?
+            .copy_from_slice(value);
+        self.transfer = Transfer::Sending {
+            invoke_id: InvokeId(0),
+            service: Outbound::Read,
+            len: value_len,
+            sent: 0,
+            block: 0,
+        };
+        self.send_next_block(out)
+    }
+
+    /// One entry of a short-name read, appending its value to the result list.
+    #[cfg(feature = "sn")]
+    fn read_one(
+        &mut self,
+        entry: &crate::xdlms::VariableAccess<'_>,
+        w: &mut SliceWriter<'_>,
+    ) -> core::result::Result<(), DataAccessResult> {
+        use crate::cosem::ShortNameTarget;
+        use crate::xdlms::VariableAccess;
+
+        let (name, access) = match *entry {
+            VariableAccess::VariableName(name) => (name, None),
+            VariableAccess::Parameterized { name, selector, parameter } => {
+                (name, Some(SelectiveAccess { selector, parameters: parameter }))
+            }
+            // A block entry among several, or a write-block entry in a read: neither
+            // names anything to read.
+            _ => return Err(DataAccessResult::OtherReason),
+        };
+        let target = self.store.resolve_short_name(name).ok_or(DataAccessResult::ObjectUndefined)?;
+        match target {
+            ShortNameTarget::Attribute { class_id, logical_name, attribute_id } => {
+                let descriptor = AttributeDescriptor::new(class_id, logical_name, attribute_id);
+                let rights = self.store.attribute_access(class_id, logical_name, attribute_id);
+                if !rights.can_read() {
+                    self.audit_read(&descriptor, DataAccessResult::ReadWriteDenied);
+                    return Err(DataAccessResult::ReadWriteDenied);
+                }
+                let outcome = self.store.get_attribute(class_id, logical_name, attribute_id, access, w);
+                self.audit_read(&descriptor, outcome.map_or_else(|e| e, |()| DataAccessResult::Success));
+                outcome
+            }
+            // Short-name referencing invokes a method by *reading* its short name with a
+            // parameter — there is no ACTION service here, which is why the selector and
+            // the parameter of a `parameterized-access` mean something different for a
+            // method than for an attribute.
+            ShortNameTarget::Method { class_id, logical_name, method_id } => {
+                let descriptor = MethodDescriptor::new(class_id, logical_name, method_id);
+                let parameters = access.map(|a| a.parameters);
+                match Self::run_method(&mut self.store, descriptor, parameters, w) {
+                    // A method that returned nothing still occupies its slot.
+                    Ok(false) => Data::Null.encode(w).map_err(|_| DataAccessResult::OtherReason),
+                    Ok(true) => Ok(()),
+                    Err(e) => Err(action_to_data_access(e)),
+                }
+            }
+        }
+    }
+
+    /// Continue a blocked short-name read.
+    #[cfg(feature = "sn")]
+    fn continue_read_block(&mut self, acked: u16, out: &mut [u8]) -> Result<usize> {
+        let Transfer::Sending { service: Outbound::Read, block, .. } = self.transfer else {
+            return self.read_error(DataAccessResult::NoLongGetInProgress, out);
+        };
+        if u32::from(acked) != block {
+            self.transfer = Transfer::Idle;
+            return self.read_error(DataAccessResult::DataBlockNumberInvalid, out);
+        }
+        self.send_next_block(out)
+    }
+
+    /// A short-name read that produced nothing at all: one entry, one error.
+    #[cfg(feature = "sn")]
+    fn read_error(&mut self, e: DataAccessResult, out: &mut [u8]) -> Result<usize> {
+        let mut body = [0u8; 2];
+        let mut w = SliceWriter::new(&mut body);
+        crate::xdlms::ReadResult::Error(e).encode(&mut w)?;
+        let n = w.written();
+        let response =
+            crate::xdlms::ReadResponse { results: List::from_raw(1, body.get(..n).unwrap_or(&[])) };
+        self.send(&Apdu::ReadResponse(response), out)
+    }
+
+    /// Write attributes by short name, confirmed or not.
+    #[cfg(feature = "sn")]
+    fn handle_write(
+        &mut self,
+        specification: &List<'_, crate::xdlms::VariableAccess<'_>>,
+        values: &List<'_, Data<'_>>,
+        confirmed: bool,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        use crate::cosem::ShortNameTarget;
+        use crate::xdlms::{VariableAccess, WriteResult};
+
+        if self.state != ServerState::Associated {
+            // An unconfirmed write has no reply, so there is nowhere to put a refusal.
+            // Saying nothing is the only honest answer; an exception response would be
+            // an APDU the client is not reading for.
+            if !confirmed {
+                return Ok(0);
+            }
+            return self.exception(StateError::ServiceNotAllowed, ServiceError::OperationNotPossible, out);
+        }
+        let required = if confirmed { Conformance::WRITE } else { Conformance::UNCONFIRMED_WRITE };
+        if self.negotiated.require(required).is_err() {
+            if !confirmed {
+                return Ok(0);
+            }
+            return self.exception(StateError::ServiceUnknown, ServiceError::ServiceNotSupported, out);
+        }
+        // One value per entry. A request whose lists disagree names writes whose values
+        // cannot be found, and pairing what is there writes one attribute's value into
+        // another.
+        if specification.len() != values.len()
+            || specification.is_empty()
+            || specification.len() > MAX_ACCESS_ITEMS
+        {
+            if !confirmed {
+                return Ok(0);
+            }
+            return self.exception(StateError::ServiceNotAllowed, ServiceError::OperationNotPossible, out);
+        }
+        self.transfer = Transfer::Idle;
+
+        let mut results = [0u8; MAX_ACCESS_ITEMS * 2];
+        let mut rw = SliceWriter::new(&mut results);
+        let mut count = 0usize;
+        for (entry, value) in specification.iter().zip(values.iter()) {
+            let entry = entry?;
+            let value = value?;
+            let (name, access) = match entry {
+                VariableAccess::VariableName(name) => (name, None),
+                VariableAccess::Parameterized { name, selector, parameter } => {
+                    (name, Some(SelectiveAccess { selector, parameters: parameter }))
+                }
+                _ => {
+                    WriteResult::Error(DataAccessResult::OtherReason).encode(&mut rw)?;
+                    count += 1;
+                    continue;
+                }
+            };
+            let outcome = match self.store.resolve_short_name(name) {
+                Some(ShortNameTarget::Attribute { class_id, logical_name, attribute_id }) => {
+                    let descriptor = AttributeDescriptor::new(class_id, logical_name, attribute_id);
+                    Self::write_one(&mut self.store, descriptor, access, value)
+                }
+                // Writing a method's short name invokes it with the value as its
+                // parameter, which is how short-name referencing spells ACTION.
+                Some(ShortNameTarget::Method { class_id, logical_name, method_id }) => {
+                    let descriptor = MethodDescriptor::new(class_id, logical_name, method_id);
+                    let mut sink = [0u8; 1];
+                    let mut discard = SliceWriter::new(&mut sink);
+                    match Self::run_method(&mut self.store, descriptor, Some(value), &mut discard) {
+                        Ok(_) => DataAccessResult::Success,
+                        Err(e) => action_to_data_access(e),
+                    }
+                }
+                None => DataAccessResult::ObjectUndefined,
+            };
+            if outcome.is_success() {
+                WriteResult::Success.encode(&mut rw)?;
+            } else {
+                WriteResult::Error(outcome).encode(&mut rw)?;
+            }
+            count += 1;
+        }
+        if !confirmed {
+            return Ok(0);
+        }
+        let n = rw.written();
+        let response =
+            crate::xdlms::WriteResponse { results: List::from_raw(count, results.get(..n).unwrap_or(&[])) };
+        self.send(&Apdu::WriteResponse(response), out)
+    }
+
     fn handle_hls_reply(
         &mut self,
         invoke_id: InvokeId,
@@ -1807,9 +2232,8 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
             policy: self.protector.policy(),
             general_allowed: self.negotiated.contains(Conformance::GENERAL_PROTECTION),
         };
-        let mut body = [0u8; N];
         let plain = self.scratch.get(..plain_len).unwrap_or(&[]);
-        let n = protect_apdu(&self.protector, &ctx, plain, &mut body, out)?;
+        let n = protect_apdu(&self.protector, &ctx, plain, out)?;
         self.check_fits(n)?;
         Ok(n)
     }
@@ -1833,6 +2257,7 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
 
     fn unprotect_into<'b>(&mut self, apdu: &[u8], buf: &'b mut [u8]) -> Result<&'b [u8]> {
         let ctx = Incoming {
+            local: self.config.system_title,
             peer: self.client_system_title,
             auth_key: self.protector.auth_key(),
             policy: self.protector.policy(),
@@ -1846,6 +2271,7 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
     /// dedicated key is what this very message delivers.
     fn unprotect_initiate<'b>(&mut self, apdu: &[u8], buf: &'b mut [u8]) -> Result<&'b [u8]> {
         let ctx = Incoming {
+            local: self.config.system_title,
             peer: self.client_system_title,
             auth_key: self.protector.auth_key(),
             policy: self.config.security.global(),
@@ -1863,8 +2289,58 @@ impl<S: ObjectStore, P: CryptoProvider, const N: usize> Server<S, P, N> {
     }
 }
 
-/// The default access a store gives when it does not say otherwise.
-pub const DEFAULT_ACCESS: AttributeAccess = AttributeAccess::READ;
+/// Whether this build can serve a referencing mode at all.
+///
+/// A flag gates code that exists, and the converse holds too: a configuration that
+/// names a mode the build left out is refused rather than accepted into an association
+/// where nothing works.
+const fn serves(referencing: Referencing) -> bool {
+    match referencing {
+        Referencing::LogicalName => true,
+        Referencing::ShortName => cfg!(feature = "sn"),
+    }
+}
 
-/// The logical name of the current association object, which every server hosts.
-pub const CURRENT_ASSOCIATION: Obis = Obis::new(0, 0, 40, 0, 0, 255);
+/// The variable-access-specification name an association reports for its referencing
+/// mode: `0x0007` for logical names, and the current association object's own base name
+/// for short ones.
+///
+/// A build without the `sn` feature never reaches the short-name arm: [`serves`] refuses
+/// that configuration at the handshake.
+const fn vaa_name(referencing: Referencing) -> u16 {
+    match referencing {
+        Referencing::LogicalName => crate::xdlms::VAA_NAME_LN,
+        #[cfg(feature = "sn")]
+        Referencing::ShortName => crate::xdlms::CURRENT_ASSOCIATION_SN,
+        #[cfg(not(feature = "sn"))]
+        Referencing::ShortName => crate::xdlms::VAA_NAME_LN,
+    }
+}
+
+/// What a method's outcome looks like to a short-name service.
+///
+/// Short-name referencing has no ACTION service and therefore no `Action-Result`: a
+/// method is invoked by reading or writing its short name, and the answer is a
+/// `Data-Access-Result` like any other. The two enumerations overlap for the codes that
+/// mean the same thing and this maps between them by name rather than by number, because
+/// they are different enumerations that happen to share several values.
+#[cfg(feature = "sn")]
+const fn action_to_data_access(e: ActionResult) -> DataAccessResult {
+    match e {
+        ActionResult::Success => DataAccessResult::Success,
+        ActionResult::HardwareFault => DataAccessResult::HardwareFault,
+        ActionResult::TemporaryFailure => DataAccessResult::TemporaryFailure,
+        ActionResult::ReadWriteDenied => DataAccessResult::ReadWriteDenied,
+        ActionResult::ObjectUndefined => DataAccessResult::ObjectUndefined,
+        ActionResult::ObjectClassInconsistent => DataAccessResult::ObjectClassInconsistent,
+        ActionResult::ObjectUnavailable => DataAccessResult::ObjectUnavailable,
+        ActionResult::TypeUnmatched => DataAccessResult::TypeUnmatched,
+        ActionResult::ScopeOfAccessViolated => DataAccessResult::ScopeOfAccessViolated,
+        ActionResult::DataBlockUnavailable => DataAccessResult::DataBlockUnavailable,
+        ActionResult::LongActionAborted => DataAccessResult::LongGetAborted,
+        ActionResult::NoLongActionInProgress => DataAccessResult::NoLongGetInProgress,
+        // Everything else — including a code a later edition defines — is "the method
+        // did not run", which is what a short-name client can act on.
+        _ => DataAccessResult::OtherReason,
+    }
+}

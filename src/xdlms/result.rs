@@ -283,7 +283,7 @@ impl<'a, T: Decode<'a>> Decode<'a> for List<'a, T> {
         for _ in 0..count {
             T::decode(&mut probe)?;
         }
-        let raw = r.take(probe.offset() - base)?;
+        let raw = r.take(probe.consumed())?;
         Ok(Self { count, raw, base, _marker: core::marker::PhantomData })
     }
 }

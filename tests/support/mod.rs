@@ -228,4 +228,33 @@ impl ObjectStore for TestMeter {
     fn audit(&mut self, event: AuditEvent) {
         self.trail.push(event);
     }
+
+    /// The short-name table this meter publishes.
+    ///
+    /// Base names are this device's own choice; the method offsets are the ones the
+    /// class tables give, which a meter knows because it implements the classes. A
+    /// client learns the base names by reading the `Association SN` object list.
+    #[cfg(feature = "sn")]
+    fn resolve_short_name(&self, name: u16) -> Option<dlms_cosem_rs::cosem::ShortNameTarget> {
+        dlms_cosem_rs::cosem::sn::resolve(SHORT_NAMES, name)
+    }
 }
+
+/// Where each of this meter's objects sits in short-name space.
+///
+/// Deliberately not contiguous, and deliberately including one object with a method: the
+/// interesting failures are a name that falls between two objects and a name that lands
+/// in a method block.
+#[cfg(feature = "sn")]
+pub const SHORT_NAMES: &[dlms_cosem_rs::cosem::ShortName] = &[
+    // Register, three attributes, `reset` at x + 0x28.
+    dlms_cosem_rs::cosem::ShortName::new(0x0028, 3, ENERGY, 3).with_methods(0x28, 1),
+    // Clock, nine attributes, whose methods this meter does not expose.
+    dlms_cosem_rs::cosem::ShortName::new(0x0100, 8, CLOCK, 9),
+    // Disconnect control: two attributes here, `remote_disconnect` at x + 0x28.
+    dlms_cosem_rs::cosem::ShortName::new(0x0200, 70, BREAKER, 2).with_methods(0x28, 2),
+    // Profile generic, whose buffer is far larger than any PDU.
+    dlms_cosem_rs::cosem::ShortName::new(0x0300, 7, LOAD_PROFILE, 8),
+    // The object nobody may read, so a refusal has somewhere to come from.
+    dlms_cosem_rs::cosem::ShortName::new(0x0400, 1, SECRET_LOG, 2),
+];

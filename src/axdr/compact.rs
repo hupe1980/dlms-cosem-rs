@@ -55,7 +55,7 @@ impl<'a> TypeDesc<'a> {
                 let start = r.offset();
                 let mut probe = Reader::with_base(r.rest(), start);
                 Self::skip_at(&mut probe, depth + 1)?;
-                let elem = r.take(probe.offset() - start)?;
+                let elem = r.take(probe.consumed())?;
                 Ok(Self::Array { len, elem })
             }
             DataTag::Structure => {
@@ -65,7 +65,7 @@ impl<'a> TypeDesc<'a> {
                 for _ in 0..count {
                     Self::skip_at(&mut probe, depth + 1)?;
                 }
-                let fields = r.take(probe.offset() - start)?;
+                let fields = r.take(probe.consumed())?;
                 Ok(Self::Structure { count, fields })
             }
             DataTag::CompactArray => Err(r.err_back(ErrorKind::InvalidTag(tag_byte), 1)),
@@ -210,7 +210,7 @@ impl<'a> CompactArray<'a> {
         let desc_base = r.offset();
         let mut probe = Reader::with_base(r.rest(), desc_base);
         TypeDesc::skip_at(&mut probe, depth)?;
-        let desc = r.take(probe.offset() - desc_base)?;
+        let desc = r.take(probe.consumed())?;
         let len = r.length()?;
         let contents_base = r.offset();
         let contents = r.take(len)?;

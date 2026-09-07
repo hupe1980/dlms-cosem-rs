@@ -112,9 +112,8 @@ impl<P: CryptoProvider, const N: usize> PushSender<P, N> {
             // one that carries the system title a listener needs to find the key.
             general_allowed: true,
         };
-        let mut body_buf = [0u8; N];
         let plain = self.scratch.get(..plain_len).unwrap_or(&[]);
-        protect_apdu(&self.protector, &ctx, plain, &mut body_buf, out)
+        protect_apdu(&self.protector, &ctx, plain, out)
     }
 
     /// The long invoke id counts pushes so a confirmed one can be matched to its

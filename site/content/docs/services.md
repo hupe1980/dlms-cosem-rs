@@ -158,6 +158,38 @@ A caller that skipped the last of those gets no error. It gets *differences wher
 were meant*, which for a rising register looks like a meter that suddenly reads almost
 nothing.
 
+## Short-name referencing (feature `sn`)
+
+A pre-logical-name meter names an attribute by a **sixteen-bit number** rather than by
+`(class, OBIS, index)`. That installed base is still in the field, so the mode is built —
+behind a feature, off by default.
+
+`read`, `write` and `unconfirmed-write` are driven from both engines; `information-report`
+decodes. Reads and writes take lists and answer one result per entry, in order, like the
+`with-list` forms above.
+
+```rust,ignore
+let n = session.read_request(&[VariableAccess::VariableName(0x0030)], &mut out)?;
+if let Response::ReadResults(results) = session.handle_response(&answer, &mut scratch)? {
+    for result in results.iter() { /* one per entry */ }
+}
+```
+
+Four things differ from the logical-name services:
+
+- **The mode is agreed once**, in the application context the AARQ proposes. A short-name
+  service sent into a logical-name association is refused before a byte goes out.
+- **There is no ACTION service.** A method is invoked by *writing* its short name, with
+  the value as the parameter.
+- **`unconfirmed-write` really is unconfirmed** — the meter sends nothing back, which is
+  why it is a separate method rather than a flag.
+- **A long read blocks** as a `data-block-result` inside the read response, continued by a
+  `block-number-access` entry.
+
+Underneath, nothing differs: the same object store, the same access-control gate, the same
+audit trail. The [cookbook](@/docs/cookbook.md) has the recipe, including how a short name
+is computed from an object's base name.
+
 ## What is not driven
 
 `action-request-with-list-and-first-pblock` — a batch of methods whose parameters are
@@ -165,5 +197,5 @@ themselves too large for one APDU. It decodes; it is not driven, because how the
 bytes divide between the methods is not stated in the material this project has, and the
 outcome of guessing is a meter running the right method on the wrong argument.
 
-Short-name referencing (`Read` / `Write`, for an older installed base) is decoded but not
-driven either.
+Short-name **write** block transfer (`write-data-block-access`) is decoded and refused per
+entry for the same reason a refusal beats a guess.

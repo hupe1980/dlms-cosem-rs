@@ -142,6 +142,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         AssociationStep::Rejected { result, diagnostic } => {
             return Err(format!("refused: {result:?} / {diagnostic:?}").into());
         }
+        // A meter that cannot even reach an AARE answers with an exception. The one
+        // worth acting on is `invocation-counter-error`: it names the value to move to.
+        AssociationStep::Exception(e) => {
+            if let Some(expected) = e.expected_invocation_counter {
+                return Err(format!(
+                    "the meter refused: {:?}. Its counter for us is {expected}; \
+                     store that and set ClientConfig::invocation_counter to it.",
+                    e.service_error
+                )
+                .into());
+            }
+            return Err(format!("the meter refused the AARQ outright: {e:?}").into());
+        }
     }
     let negotiated = session.negotiated().ok_or("no InitiateResponse")?;
     println!(

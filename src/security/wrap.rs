@@ -17,13 +17,13 @@
 //! * **plain** — for the APDUs that precede the association, and for the ones a peer may
 //!   legitimately send unprotected.
 
-use crate::codec::{Decode, Encode, Error, ErrorKind, Reader, Result, SliceWriter, Writer};
-use crate::xdlms::{ApduTag, CipheredService, GeneralGloCiphering, Protection};
+use crate::codec::{Decode, Error, ErrorKind, Reader, Result, SliceWriter, Writer};
+use crate::xdlms::{ApduTag, CipheredService, GeneralCiphering, GeneralGloCiphering, KeyInfo, Protection};
 
-use super::CryptoProvider;
 use super::counter::ReplayWindow;
 use super::keys::SystemTitle;
 use super::protect::{Protector, SecurityPolicy};
+use super::{CryptoProvider, SecuritySuite};
 
 /// Everything the wrapper needs about the message going out.
 pub(crate) struct Outgoing<'a> {
@@ -44,18 +44,31 @@ pub(crate) struct Outgoing<'a> {
     pub general_allowed: bool,
 }
 
+/// The longest fixed part a protected APDU puts in front of its payload: the APDU tag,
+/// a length-prefixed eight-byte system title for the general forms, the ciphered
+/// content's own length prefix at its longest, the security control byte and the
+/// invocation counter.
+const HEADER_MAX: usize = 1 + (1 + 8) + 5 + 1 + 4;
+
 /// Wrap `plain` — a complete plain APDU, its own tag included — into `out`.
 ///
 /// Returns how many bytes of `out` the protected APDU occupies.
+///
+/// The cipher runs **in place, inside `out`**, behind the header rather than into a
+/// scratch buffer of its own. That is worth the small amount of arithmetic it costs:
+/// the scratch would have to be as large as the largest APDU the peer negotiated, so
+/// every caller of this function carried an `N`-sized buffer live across the call — one
+/// on the client, one on the push sender, and one on the server on top of the three it
+/// already holds. The payload's length is known before a byte of it is written —
+/// the plaintext plus a tag when there is one — so the header can be laid down first.
 pub(crate) fn protect_apdu<P: CryptoProvider>(
     protector: &Protector<P>,
     out_ctx: &Outgoing<'_>,
     plain: &[u8],
-    body: &mut [u8],
     out: &mut [u8],
 ) -> Result<usize> {
-    let mut w = SliceWriter::new(out);
     if out_ctx.policy.is_none() {
+        let mut w = SliceWriter::new(out);
         w.write_bytes(plain)?;
         return Ok(w.written());
     }
@@ -65,25 +78,20 @@ pub(crate) fn protect_apdu<P: CryptoProvider>(
         .copied()
         .and_then(ApduTag::from_u8)
         .ok_or_else(|| Error::new(ErrorKind::InvalidTag(plain.first().copied().unwrap_or(0)), 0))?;
-    let protection = if out_ctx.policy.dedicated { Protection::Dedicated } else { Protection::Global };
+    let protection = if out_ctx.policy.dedicated() { Protection::Dedicated } else { Protection::Global };
+    let auth_key = out_ctx.auth_key.ok_or_else(|| Error::new(ErrorKind::Unsupported, 0))?;
 
-    let payload = protector.protect_as(
-        out_ctx.policy,
-        &out_ctx.system_title,
-        out_ctx.invocation_counter,
-        out_ctx.auth_key.ok_or_else(|| Error::new(ErrorKind::Unsupported, 0))?,
-        plain,
-        body,
-    )?;
-    let ciphered = CipheredService {
-        security_control: out_ctx.policy.control(),
-        invocation_counter: out_ctx.invocation_counter,
-        payload,
-    };
+    // What the cipher will produce, counted rather than measured afterwards.
+    let payload_len = plain
+        .len()
+        .checked_add(if out_ctx.policy.authenticated { SecuritySuite::TAG_LEN } else { 0 })
+        .ok_or_else(|| Error::new(ErrorKind::InvalidLength, 0))?;
+    let control = out_ctx.policy.control();
 
+    let mut header = [0u8; HEADER_MAX];
+    let mut hw = SliceWriter::new(&mut header);
     if let Some(tag) = plain_tag.protected_as(protection) {
-        w.write_u8(tag.as_u8())?;
-        ciphered.encode(&mut w)?;
+        hw.write_u8(tag.as_u8())?;
     } else {
         // No ciphered tag for this service. `general-glo-ciphering` is the general
         // wrapper the standard provides for exactly that, and it is the only way an
@@ -95,14 +103,42 @@ pub(crate) fn protect_apdu<P: CryptoProvider>(
             Protection::Dedicated => ApduTag::GeneralDedCiphering,
             _ => ApduTag::GeneralGloCiphering,
         };
-        w.write_u8(tag.as_u8())?;
-        GeneralGloCiphering { system_title: out_ctx.system_title.as_bytes(), ciphered }.encode(&mut w)?;
+        hw.write_u8(tag.as_u8())?;
+        hw.write_length_prefixed(out_ctx.system_title.as_bytes())?;
     }
-    Ok(w.written())
+    // The `ciphered-content` octet string: its length, then the security header the
+    // payload follows. Written by hand rather than through `CipheredService` because
+    // the payload does not exist yet — it is about to be produced in place behind this.
+    hw.write_length(5usize.saturating_add(payload_len))?;
+    hw.write_u8(control.0)?;
+    hw.write_u32(out_ctx.invocation_counter)?;
+    let header_len = hw.written();
+
+    let head = out
+        .get_mut(..header_len)
+        .ok_or_else(|| Error::new(ErrorKind::BufferTooSmall { needed: header_len }, 0))?;
+    head.copy_from_slice(header.get(..header_len).unwrap_or(&[]));
+    let body = out
+        .get_mut(header_len..)
+        .ok_or_else(|| Error::new(ErrorKind::BufferTooSmall { needed: header_len }, 0))?;
+    let written = protector
+        .protect_as(out_ctx.policy, &out_ctx.system_title, out_ctx.invocation_counter, auth_key, plain, body)?
+        .len();
+    // The header was sized from `payload_len`; if the cipher disagreed the length prefix
+    // would be a lie, and a length prefix that disagrees with its own body is the defect
+    // that decodes into plausible nonsense at the far end.
+    debug_assert_eq!(written, payload_len);
+    if written != payload_len {
+        return Err(Error::new(ErrorKind::InvalidLength, header_len));
+    }
+    Ok(header_len.saturating_add(written))
 }
 
 /// Everything the wrapper needs about the message coming in.
 pub(crate) struct Incoming<'a> {
+    /// This end's own system title, when it has one. `general-ciphering` names its
+    /// recipient, and a frame addressed to somebody else is not this end's to open.
+    pub local: Option<SystemTitle>,
     /// The peer's system title, once it is known. A `general-*-ciphering` APDU carries
     /// one; it must be the peer's, or the frame is somebody else's.
     pub peer: Option<SystemTitle>,
@@ -147,7 +183,66 @@ pub(crate) fn unprotect_apdu<'b, P: CryptoProvider>(
                 }
             }
             let dedicated = tag == ApduTag::GeneralDedCiphering;
-            (ctx.policy.with_dedicated(dedicated), None, g.ciphered)
+            if dedicated != ctx.policy.dedicated() {
+                return Err(Error::new(ErrorKind::UnexpectedMessage, 0));
+            }
+            (ctx.policy, None, g.ciphered)
+        }
+        // `general-ciphering` names both ends and carries its own key information. Its
+        // *content* is protected exactly as `general-glo-ciphering`'s is — the same
+        // nonce, the same additional data — so the identified-key form is openable with
+        // nothing this crate lacks, and it is the form a peer uses when it wants to name
+        // the recipient. The wrapped and agreed forms deliver a key with the message and
+        // need suite 1's or suite 2's asymmetric half; they are refused by name.
+        ApduTag::GeneralCiphering => {
+            let g = GeneralCiphering::decode(&mut r)?;
+            // Every field of this header travels in the clear and outside the tag, so
+            // each is a hint rather than a statement. The two identities are still
+            // *checked*, because opening a frame addressed elsewhere is work this end
+            // should not do and a plaintext this end should not hold — the GCM tag is
+            // what proves who sent it.
+            if let Some(peer) = ctx.peer {
+                if g.originator_system_title != peer.as_bytes() {
+                    return Err(Error::new(ErrorKind::UnexpectedMessage, 0));
+                }
+            }
+            if let Some(local) = ctx.local {
+                // Empty means "not stated", which the standard allows; anything else
+                // must be us.
+                if !g.recipient_system_title.is_empty() && g.recipient_system_title != local.as_bytes() {
+                    return Err(Error::new(ErrorKind::UnexpectedMessage, 0));
+                }
+            }
+            // Which key opens it is this end's decision, as everywhere else (D50). An
+            // absent key-info means the association's own key set; an identified key
+            // must *name* that same key set rather than choose a different one.
+            match g.key_info {
+                None => {}
+                Some(KeyInfo::Identified { key_id }) if Some(key_id) == ctx.policy.key_usage().key_id() => {}
+                Some(KeyInfo::Identified { .. }) => {
+                    return Err(Error::new(ErrorKind::UnexpectedMessage, 0));
+                }
+                // A key delivered with the message, wrapped under a key-encrypting key
+                // or derived by agreement. Both are suite 1 and 2 work.
+                Some(KeyInfo::Wrapped { .. } | KeyInfo::Agreed { .. }) => {
+                    return Err(Error::new(ErrorKind::Unsupported, 0));
+                }
+            }
+            // There is no `general-ded-ciphering` equivalent here: the key is named by
+            // key-info, so an association on the dedicated key set cannot be addressed
+            // this way and a frame that tries is refused rather than opened globally.
+            if ctx.policy.dedicated() {
+                return Err(Error::new(ErrorKind::UnexpectedMessage, 0));
+            }
+            (ctx.policy, None, g.ciphered)
+        }
+        // An ECDSA signature over the APDU, which needs suite 1's or suite 2's
+        // asymmetric half. Named here rather than left to fall through to the
+        // unprotected branch, where the answer would be `UnexpectedMessage` and a caller
+        // could not tell "this peer speaks a wrapper we do not" from "this peer
+        // downgraded to plaintext".
+        ApduTag::GeneralSigning => {
+            return Err(Error::new(ErrorKind::Unsupported, 0));
         }
         _ => {
             let Some((protection, plain_tag)) = tag.unprotect() else {
@@ -162,8 +257,18 @@ pub(crate) fn unprotect_apdu<'b, P: CryptoProvider>(
                     .copy_from_slice(apdu);
                 return buf.get(..n).ok_or_else(|| Error::new(ErrorKind::InvalidLength, 0));
             };
+            // The `glo-`/`ded-` tag names a key set, and after the handshake both ends
+            // have agreed which one that is. A frame naming the other one is refused for
+            // the same reason a frame naming the broadcast key set is: which key opens a
+            // message is not the sender's to choose (D50). It also catches the honest
+            // version of the same fault — one end switching to the dedicated key and the
+            // other not — at the first message rather than as a tag failure with nothing
+            // to point at.
             let dedicated = protection == Protection::Dedicated;
-            (ctx.policy.with_dedicated(dedicated), Some(plain_tag), CipheredService::decode(&mut r)?)
+            if dedicated != ctx.policy.dedicated() {
+                return Err(Error::new(ErrorKind::UnexpectedMessage, 0));
+            }
+            (ctx.policy, Some(plain_tag), CipheredService::decode(&mut r)?)
         }
     };
 

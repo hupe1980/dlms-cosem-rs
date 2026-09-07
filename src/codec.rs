@@ -190,6 +190,21 @@ impl<'a> Reader<'a> {
         self.buf.get(self.pos..).unwrap_or(&[])
     }
 
+    /// How many bytes this reader has taken, ignoring the base.
+    ///
+    /// This is what a *probe* reader is for: make one over `rest()`, run a sub-decoder,
+    /// ask how much it used. A list finds its end that way, and so does a compact array's
+    /// type description.
+    ///
+    /// Written `probe.offset() - base` instead, that is a subtraction the optimiser
+    /// cannot discharge — it cannot see that a reader's offset never goes below its own
+    /// base — so it emits an overflow check in *every monomorphisation* of every such
+    /// decoder. Asking the reader needs no arithmetic at all.
+    #[must_use]
+    pub const fn consumed(&self) -> usize {
+        self.pos
+    }
+
     /// An error at the current position.
     #[must_use]
     pub const fn err(&self, kind: ErrorKind) -> Error {

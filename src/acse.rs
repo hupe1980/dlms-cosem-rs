@@ -16,6 +16,21 @@ use crate::codec::{Decode, Encode, Error, ErrorKind, Reader, Result, Writer};
 /// `2.16.756.5.8` — joint-iso-itu-t(2) country(16) ch(756) dlms-ua(5).
 const OID_PREFIX: [u8; 5] = [0x60, 0x85, 0x74, 0x05, 0x08];
 
+/// How objects are addressed in an association.
+///
+/// Not a per-request choice: it is decided once, by the application context the AARQ
+/// proposes, and both ends are bound to it for the life of the association. It lives
+/// here rather than with either engine because the context is where it is *stated*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Referencing {
+    /// By class, logical name and attribute index. What every modern meter uses.
+    #[default]
+    LogicalName,
+    /// By sixteen-bit short name. Kept for an installed base of older meters, and behind
+    /// the `sn` feature.
+    ShortName,
+}
+
 /// Which naming and protection the association uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicationContext {
@@ -66,6 +81,23 @@ impl ApplicationContext {
     #[must_use]
     pub const fn is_logical_name(self) -> bool {
         matches!(self, Self::LogicalName | Self::LogicalNameCiphered)
+    }
+
+    /// The context for a referencing mode, ciphered or not.
+    #[must_use]
+    pub const fn for_referencing(referencing: Referencing, ciphered: bool) -> Self {
+        match (referencing, ciphered) {
+            (Referencing::LogicalName, false) => Self::LogicalName,
+            (Referencing::LogicalName, true) => Self::LogicalNameCiphered,
+            (Referencing::ShortName, false) => Self::ShortName,
+            (Referencing::ShortName, true) => Self::ShortNameCiphered,
+        }
+    }
+
+    /// How this context addresses objects.
+    #[must_use]
+    pub const fn referencing(self) -> Referencing {
+        if self.is_logical_name() { Referencing::LogicalName } else { Referencing::ShortName }
     }
 
     /// The same context with ciphering switched on or off.

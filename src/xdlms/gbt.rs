@@ -241,9 +241,16 @@ impl<'a> GbtSender<'a> {
     ///
     /// # Errors
     /// [`ErrorKind::UnexpectedMessage`] when the peer acknowledges a block that was
-    /// never sent, which no honest receiver does.
+    /// never sent, or one below what it has already acknowledged.
+    ///
+    /// The second bound is what keeps the retry sub-procedure finite. Rewinding is
+    /// bounded progress only while acknowledgements move forward: a peer that answers
+    /// every window with a lower number than the last leaves the sender resending the
+    /// same run for ever, and a transfer with no clock behind it has nothing else to
+    /// stop it. An acknowledged block has been *delivered*, so un-acknowledging one is
+    /// not a retry — it is a peer that cannot be believed.
     pub fn acknowledge(&mut self, block_number_ack: u16) -> Result<()> {
-        if block_number_ack > self.block {
+        if block_number_ack > self.block || block_number_ack < self.acked {
             return Err(Error::new(ErrorKind::UnexpectedMessage, 0));
         }
         self.acked = block_number_ack;
@@ -412,6 +419,28 @@ mod tests {
         b.encode(&mut w).unwrap();
         assert_eq!(w.as_slice(), [0x44, 0x00, 0x01, 0x00, 0x00, 0x03, 0xC4, 0x01, 0x81]);
         assert_eq!(GeneralBlockTransfer::from_bytes(w.as_slice()).unwrap(), b);
+    }
+
+    /// The retry sub-procedure rewinds, and rewinding is bounded progress only while
+    /// acknowledgements move forward. A peer that un-acknowledges a block it already
+    /// acknowledged leaves the sender resending the same run for ever — and GBT has no
+    /// clock behind it to notice, so the loop is the failure.
+    #[test]
+    fn an_acknowledgement_that_goes_backwards_is_refused() {
+        let apdu = [0xC4u8; 300];
+        let mut sender = GbtSender::new(&apdu, 100, 4, true).unwrap();
+        let mut frame = [0u8; 256];
+        while sender.next_block(&mut frame).unwrap().is_some() {}
+        assert_eq!(sender.block(), 3);
+
+        // A block that was never sent is not something an honest receiver names.
+        assert_eq!(sender.acknowledge(4).unwrap_err().kind, ErrorKind::UnexpectedMessage);
+        // One lower than the last sent is the retry rule, and is accepted.
+        sender.acknowledge(2).unwrap();
+        assert_eq!(sender.block(), 2, "and rewinds to just after it");
+        // Going back below what is already acknowledged is not a retry.
+        assert_eq!(sender.acknowledge(1).unwrap_err().kind, ErrorKind::UnexpectedMessage);
+        assert!(sender.acknowledge(2).is_ok(), "repeating the same acknowledgement is harmless");
     }
 
     /// Drive a whole APDU across, one block at a time, with no streaming.

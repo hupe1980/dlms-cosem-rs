@@ -11,7 +11,7 @@ use crate::codec::{Decode, Encode, ErrorKind, Reader, Result, Writer};
 pub struct SecurityControl(pub u8);
 
 impl SecurityControl {
-    /// A control byte for a suite, with the chosen protection.
+    /// A control byte for a suite, with the chosen protection, on the unicast key set.
     #[must_use]
     pub const fn new(suite: u8, authenticated: bool, encrypted: bool) -> Self {
         let mut v = suite & 0x0F;
@@ -22,6 +22,16 @@ impl SecurityControl {
             v |= 0x20;
         }
         Self(v)
+    }
+
+    /// The same control byte with the broadcast-key bit set or cleared.
+    ///
+    /// The bit selects which key set opens the frame, so it is part of what a receiver
+    /// *demands* rather than something it reads off the wire — see
+    /// [`crate::security::SecurityPolicy::broadcast`].
+    #[must_use]
+    pub const fn with_broadcast(self, broadcast: bool) -> Self {
+        Self(if broadcast { self.0 | 0x40 } else { self.0 & !0x40 })
     }
 
     /// The security suite id, 0–2.

@@ -10,6 +10,10 @@ use super::initiate::{InitiateRequest, InitiateResponse};
 use super::notify::{DataNotification, EventNotification};
 use super::protection::{CipheredService, GeneralCiphering, GeneralGloCiphering, GeneralSigning};
 use super::service::{ActionRequest, ActionResponse, GetRequest, GetResponse, SetRequest, SetResponse};
+#[cfg(feature = "sn")]
+use super::sn::{
+    InformationReportRequest, ReadRequest, ReadResponse, UnconfirmedWriteRequest, WriteRequest, WriteResponse,
+};
 use super::tag::{ApduTag, Protection};
 
 /// Anything the application layer can send.
@@ -41,6 +45,29 @@ pub enum Apdu<'a> {
 
     DataNotification(DataNotification<'a>),
     EventNotification(EventNotification<'a>),
+
+    /// The short-name services, behind the `sn` feature.
+    ///
+    /// Legacy addressing: an attribute is a sixteen-bit number rather than a class,
+    /// a logical name and an index. Still what an installed base of pre-logical-name
+    /// meters speaks.
+    #[cfg(feature = "sn")]
+    ReadRequest(ReadRequest<'a>),
+    #[cfg(feature = "sn")]
+    #[allow(missing_docs)]
+    ReadResponse(ReadResponse<'a>),
+    #[cfg(feature = "sn")]
+    #[allow(missing_docs)]
+    WriteRequest(WriteRequest<'a>),
+    #[cfg(feature = "sn")]
+    #[allow(missing_docs)]
+    WriteResponse(WriteResponse<'a>),
+    #[cfg(feature = "sn")]
+    #[allow(missing_docs)]
+    UnconfirmedWriteRequest(UnconfirmedWriteRequest<'a>),
+    #[cfg(feature = "sn")]
+    #[allow(missing_docs)]
+    InformationReportRequest(InformationReportRequest<'a>),
 
     ExceptionResponse(ExceptionResponse),
     ConfirmedServiceError(ConfirmedServiceError),
@@ -99,6 +126,18 @@ impl Apdu<'_> {
             Self::AccessResponse(_) => ApduTag::AccessResponse,
             Self::DataNotification(_) => ApduTag::DataNotification,
             Self::EventNotification(_) => ApduTag::EventNotificationRequest,
+            #[cfg(feature = "sn")]
+            Self::ReadRequest(_) => ApduTag::ReadRequest,
+            #[cfg(feature = "sn")]
+            Self::ReadResponse(_) => ApduTag::ReadResponse,
+            #[cfg(feature = "sn")]
+            Self::WriteRequest(_) => ApduTag::WriteRequest,
+            #[cfg(feature = "sn")]
+            Self::WriteResponse(_) => ApduTag::WriteResponse,
+            #[cfg(feature = "sn")]
+            Self::UnconfirmedWriteRequest(_) => ApduTag::UnconfirmedWriteRequest,
+            #[cfg(feature = "sn")]
+            Self::InformationReportRequest(_) => ApduTag::InformationReportRequest,
             Self::ExceptionResponse(_) => ApduTag::ExceptionResponse,
             Self::ConfirmedServiceError(_) => ApduTag::ConfirmedServiceError,
             Self::GeneralBlockTransfer(_) => ApduTag::GeneralBlockTransfer,
@@ -171,6 +210,18 @@ impl Encode for Apdu<'_> {
             Self::AccessResponse(v) => v.encode(w),
             Self::DataNotification(v) => v.encode(w),
             Self::EventNotification(v) => v.encode(w),
+            #[cfg(feature = "sn")]
+            Self::ReadRequest(v) => v.encode(w),
+            #[cfg(feature = "sn")]
+            Self::ReadResponse(v) => v.encode(w),
+            #[cfg(feature = "sn")]
+            Self::WriteRequest(v) => v.encode(w),
+            #[cfg(feature = "sn")]
+            Self::WriteResponse(v) => v.encode(w),
+            #[cfg(feature = "sn")]
+            Self::UnconfirmedWriteRequest(v) => v.encode(w),
+            #[cfg(feature = "sn")]
+            Self::InformationReportRequest(v) => v.encode(w),
             Self::ExceptionResponse(v) => v.encode(w),
             Self::ConfirmedServiceError(v) => v.encode(w),
             Self::GeneralBlockTransfer(v) => v.encode(w),
@@ -216,6 +267,22 @@ impl<'a> Decode<'a> for Apdu<'a> {
             ApduTag::AccessResponse => Self::AccessResponse(AccessResponse::decode(r)?),
             ApduTag::DataNotification => Self::DataNotification(DataNotification::decode(r)?),
             ApduTag::EventNotificationRequest => Self::EventNotification(EventNotification::decode(r)?),
+            #[cfg(feature = "sn")]
+            ApduTag::ReadRequest => Self::ReadRequest(ReadRequest::decode(r)?),
+            #[cfg(feature = "sn")]
+            ApduTag::ReadResponse => Self::ReadResponse(ReadResponse::decode(r)?),
+            #[cfg(feature = "sn")]
+            ApduTag::WriteRequest => Self::WriteRequest(WriteRequest::decode(r)?),
+            #[cfg(feature = "sn")]
+            ApduTag::WriteResponse => Self::WriteResponse(WriteResponse::decode(r)?),
+            #[cfg(feature = "sn")]
+            ApduTag::UnconfirmedWriteRequest => {
+                Self::UnconfirmedWriteRequest(UnconfirmedWriteRequest::decode(r)?)
+            }
+            #[cfg(feature = "sn")]
+            ApduTag::InformationReportRequest => {
+                Self::InformationReportRequest(InformationReportRequest::decode(r)?)
+            }
             ApduTag::ExceptionResponse => Self::ExceptionResponse(ExceptionResponse::decode(r)?),
             ApduTag::ConfirmedServiceError => Self::ConfirmedServiceError(ConfirmedServiceError::decode(r)?),
             ApduTag::GeneralBlockTransfer => Self::GeneralBlockTransfer(GeneralBlockTransfer::decode(r)?),

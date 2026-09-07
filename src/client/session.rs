@@ -1,7 +1,8 @@
 //! The client session.
 
 use crate::acse::{
-    Aare, Aarq, ApplicationContext, AssociationResult, AuthMechanism, Diagnostic, ReleaseReason, Rlrq,
+    Aare, Aarq, ApplicationContext, AssociationResult, AuthMechanism, Diagnostic, Referencing, ReleaseReason,
+    Rlrq,
 };
 use crate::axdr::Data;
 use crate::codec::{Decode, Encode, Error, ErrorKind, Reader, Result, SliceWriter, Writer};
@@ -32,16 +33,6 @@ const PLAIN_FROM_SERVER: &[ApduTag] = &[ApduTag::Aare, ApduTag::ReleaseResponse,
 
 /// What the AARE's user information may be when the association is not ciphered.
 const PLAIN_INITIATE: &[ApduTag] = &[ApduTag::InitiateResponse, ApduTag::ConfirmedServiceError];
-
-/// How objects are addressed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Referencing {
-    /// By class, logical name and attribute index. What every modern meter uses.
-    #[default]
-    LogicalName,
-    /// By sixteen-bit short name. Kept for an installed base of older meters.
-    ShortName,
-}
 
 /// What the session is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +67,17 @@ pub enum AssociationStep {
         /// Why.
         diagnostic: Diagnostic,
     },
+    /// The server answered the AARQ with an exception rather than an AARE, so the
+    /// association was never attempted.
+    ///
+    /// The case worth acting on is `invocation-counter-error`: it carries the counter
+    /// the server expects next, and a client whose stored value went stale — a restart
+    /// from a backup, most often — can move to it with
+    /// [`ClientSession::set_invocation_counter`] and associate again. The exception is
+    /// unprotected and anyone can forge one, so the value is *reported* rather than
+    /// applied: moving a counter is the caller's decision because moving it backwards
+    /// burns the key.
+    Exception(ExceptionResponse),
 }
 
 /// What a response carried.
@@ -118,6 +120,12 @@ pub enum Response<'a> {
         /// One outcome per item.
         results: List<'a, crate::xdlms::AccessResponseSpecification>,
     },
+    /// One answer per entry of a [`ClientSession::read_request`], in order.
+    #[cfg(feature = "sn")]
+    ReadResults(List<'a, crate::xdlms::ReadResult<'a>>),
+    /// One outcome per entry of a [`ClientSession::write_request`], in order.
+    #[cfg(feature = "sn")]
+    WriteResults(List<'a, crate::xdlms::WriteResult>),
     /// A write or an invocation succeeded.
     Ok,
     /// A method returned a value.
@@ -345,11 +353,7 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
     }
 
     fn application_context(&self) -> ApplicationContext {
-        let base = match self.config.referencing {
-            Referencing::LogicalName => ApplicationContext::LogicalName,
-            Referencing::ShortName => ApplicationContext::ShortName,
-        };
-        base.with_ciphering(!self.config.security.is_none())
+        ApplicationContext::for_referencing(self.config.referencing, !self.config.security.is_none())
     }
 
     /// Build the AARQ that opens the association.
@@ -358,6 +362,13 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
     /// When the buffer is too small, when high level security is configured without a
     /// system title, or when a challenge is needed and the provider has no entropy.
     pub fn associate_request(&mut self, out: &mut [u8]) -> Result<usize> {
+        // Proposing short-name referencing from a build that left the `sn` feature out
+        // would open an association with no services in it. Refusing here says so before
+        // a byte goes out, rather than after a handshake that appeared to work.
+        #[cfg(not(feature = "sn"))]
+        if self.config.referencing == Referencing::ShortName {
+            return Err(Error::new(ErrorKind::Unsupported, 0));
+        }
         let ciphered = !self.config.security.is_none();
         if (ciphered || self.config.mechanism == AuthMechanism::HighGmac)
             && self.config.system_title.is_none()
@@ -375,7 +386,7 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
         };
         // The dedicated key travels inside the ciphered InitiateRequest, so it is only
         // ever offered in a ciphered context — sending one in the clear would publish it.
-        if ciphered && self.config.security.dedicated {
+        if ciphered && self.config.security.dedicated() {
             initiate.dedicated_key =
                 Some(self.protector.provider().dedicated_key().ok_or(Error::new(ErrorKind::Unsupported, 0))?);
         }
@@ -452,6 +463,15 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
     /// When the APDU is not an AARE, when the negotiated version is not one this crate
     /// speaks, or when the server's InitiateResponse cannot be unprotected.
     pub fn handle_associate_response(&mut self, apdu: &[u8]) -> Result<AssociationStep> {
+        // A server that cannot even get as far as an AARE answers with an exception.
+        // Decoding it as a malformed AARE would turn the one message that says how to
+        // recover into `invalid tag 0xd8`.
+        if apdu.first().copied() == Some(ApduTag::ExceptionResponse.as_u8()) {
+            self.state = SessionState::Closed;
+            return Ok(AssociationStep::Exception(ExceptionResponse::from_bytes(
+                apdu.get(1..).unwrap_or(&[]),
+            )?));
+        }
         let aare = Aare::from_bytes(apdu)?;
         if let Some(title) = aare.responding_ap_title {
             self.server_system_title = Some(SystemTitle::from_slice(title)?);
@@ -522,7 +542,7 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
 
         // From here on the association's own protection applies, which is the dedicated
         // key set when one was delivered in the InitiateRequest.
-        if self.config.security.dedicated {
+        if self.config.security.dedicated() {
             self.protector.set_dedicated(true);
         }
 
@@ -1048,6 +1068,156 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
         self.send(&Apdu::AccessRequest(request), out)
     }
 
+    /// Read attributes by **short name** — the legacy addressing mode.
+    ///
+    /// One entry per thing to read, answered by a [`Response::ReadResults`] with one
+    /// result in the same position. A short name is an object's base name plus an
+    /// offset; [`crate::cosem::ShortName`] computes one, and the base names come from
+    /// the meter's own `Association SN` object list.
+    ///
+    /// Short-name referencing is a property of the *association*, not of a request:
+    /// set [`ClientConfig::referencing`] to [`Referencing::ShortName`] so the AARQ
+    /// proposes the short-name application context. A meter that answered a
+    /// logical-name association with short names would be answering a different
+    /// question, so this refuses to send one into the wrong context.
+    ///
+    /// # Errors
+    /// When the association is not open or is not a short-name one, when the server did
+    /// not agree to [`Conformance::READ`], when the list is empty, or when a buffer is
+    /// too small.
+    #[cfg(feature = "sn")]
+    pub fn read_request(
+        &mut self,
+        items: &[crate::xdlms::VariableAccess<'_>],
+        out: &mut [u8],
+    ) -> Result<usize> {
+        self.require_associated()?;
+        self.require_short_name()?;
+        self.require_conformance(Conformance::READ)?;
+        if items.is_empty() {
+            return Err(Error::new(ErrorKind::InvalidValue, 0));
+        }
+        let mut encoded = [0u8; N];
+        let mut lw = SliceWriter::new(&mut encoded);
+        for item in items {
+            item.encode(&mut lw)?;
+        }
+        let n = lw.written();
+        let request = crate::xdlms::ReadRequest {
+            specification: List::from_raw(items.len(), encoded.get(..n).unwrap_or(&[])),
+        };
+        // The short-name services carry no invoke id at all, so nothing is outstanding
+        // under one: leaving a stale id here would let a later block request continue an
+        // invocation that is over.
+        self.outstanding = None;
+        self.send(&Apdu::ReadRequest(request), out)
+    }
+
+    /// Ask for the next block of a long short-name read.
+    ///
+    /// `block_number` acknowledges the block just received. Unlike the logical-name
+    /// services this is an ordinary read entry rather than a form of its own, which is
+    /// why it takes the same path.
+    ///
+    /// # Errors
+    /// As [`ClientSession::read_request`].
+    #[cfg(feature = "sn")]
+    pub fn read_next_block_request(&mut self, block_number: u16, out: &mut [u8]) -> Result<usize> {
+        self.read_request(&[crate::xdlms::VariableAccess::BlockNumber(block_number)], out)
+    }
+
+    /// Write attributes by **short name**.
+    ///
+    /// The two lists are positional: value *i* goes to entry *i*. The answer is a
+    /// [`Response::WriteResults`] with one outcome per entry, so a single refused write
+    /// does not lose the batch.
+    ///
+    /// # Errors
+    /// When the association is not open or is not a short-name one, when the server did
+    /// not agree to [`Conformance::WRITE`], when the two lists are different lengths, or
+    /// when a buffer is too small.
+    #[cfg(feature = "sn")]
+    pub fn write_request(
+        &mut self,
+        items: &[crate::xdlms::VariableAccess<'_>],
+        values: &[Data<'_>],
+        out: &mut [u8],
+    ) -> Result<usize> {
+        self.require_short_name_write(items, values)?;
+        // Both lists go into one local buffer, back to back, because `List` is a
+        // borrowed view that never owns what it describes — and a local rather than a
+        // field of the session, so building the APDU afterwards does not conflict with
+        // it.
+        let mut encoded = [0u8; N];
+        let mut lw = SliceWriter::new(&mut encoded);
+        for item in items {
+            item.encode(&mut lw)?;
+        }
+        let spec_end = lw.written();
+        for value in values {
+            value.encode(&mut lw)?;
+        }
+        let end = lw.written();
+        let request = crate::xdlms::WriteRequest {
+            specification: List::from_raw(items.len(), encoded.get(..spec_end).unwrap_or(&[])),
+            values: List::from_raw(values.len(), encoded.get(spec_end..end).unwrap_or(&[])),
+        };
+        self.outstanding = None;
+        self.send(&Apdu::WriteRequest(request), out)
+    }
+
+    /// The same write, with no answer expected.
+    ///
+    /// `unconfirmed-write` is a distinct service rather than a flag on the confirmed one,
+    /// and this is a distinct method for the same reason: a caller that sends one must
+    /// not then wait for a reply. It costs [`Conformance::UNCONFIRMED_WRITE`] rather than
+    /// [`Conformance::WRITE`].
+    ///
+    /// # Errors
+    /// As [`ClientSession::write_request`].
+    #[cfg(feature = "sn")]
+    pub fn unconfirmed_write_request(
+        &mut self,
+        items: &[crate::xdlms::VariableAccess<'_>],
+        values: &[Data<'_>],
+        out: &mut [u8],
+    ) -> Result<usize> {
+        self.require_short_name_write(items, values)?;
+        self.require_conformance(Conformance::UNCONFIRMED_WRITE)?;
+        let mut encoded = [0u8; N];
+        let mut lw = SliceWriter::new(&mut encoded);
+        for item in items {
+            item.encode(&mut lw)?;
+        }
+        let spec_end = lw.written();
+        for value in values {
+            value.encode(&mut lw)?;
+        }
+        let end = lw.written();
+        let request = crate::xdlms::UnconfirmedWriteRequest {
+            specification: List::from_raw(items.len(), encoded.get(..spec_end).unwrap_or(&[])),
+            values: List::from_raw(values.len(), encoded.get(spec_end..end).unwrap_or(&[])),
+        };
+        self.outstanding = None;
+        self.send(&Apdu::UnconfirmedWriteRequest(request), out)
+    }
+
+    /// The checks both short-name writes share.
+    #[cfg(feature = "sn")]
+    fn require_short_name_write(
+        &self,
+        items: &[crate::xdlms::VariableAccess<'_>],
+        values: &[Data<'_>],
+    ) -> Result<()> {
+        self.require_associated()?;
+        self.require_short_name()?;
+        self.require_conformance(Conformance::WRITE)?;
+        if items.is_empty() || items.len() != values.len() {
+            return Err(Error::new(ErrorKind::InvalidValue, 0));
+        }
+        Ok(())
+    }
+
     /// Build an ACTION request.
     ///
     /// # Errors
@@ -1141,6 +1311,10 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
                 Response::Block { last: block.last_block, number: block.block_number, data: block.raw_data }
             }
             Apdu::AccessResponse(r) => Response::Access { data: r.data, results: r.response_specification },
+            #[cfg(feature = "sn")]
+            Apdu::ReadResponse(r) => Response::ReadResults(r.results),
+            #[cfg(feature = "sn")]
+            Apdu::WriteResponse(r) => Response::WriteResults(r.results),
             Apdu::ExceptionResponse(e) => Response::Exception(e),
             Apdu::Rlre(_) => {
                 self.state = SessionState::Closed;
@@ -1172,15 +1346,15 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
             policy: self.protector.policy(),
             general_allowed: self.general_protection_agreed(),
         };
-        let mut body = [0u8; N];
         let plain = self.scratch.get(..plain_len).unwrap_or(&[]);
-        protect_apdu(&self.protector, &ctx, plain, &mut body, out)
+        protect_apdu(&self.protector, &ctx, plain, out)
     }
 
     /// Remove protection from the AARE's user information, which is protected with the
     /// global key set even when the association will use a dedicated one.
     fn unprotect_initiate<'b>(&mut self, apdu: &[u8], buf: &'b mut [u8]) -> Result<&'b [u8]> {
         let ctx = Incoming {
+            local: self.config.system_title,
             peer: self.server_system_title,
             auth_key: self.protector.auth_key(),
             policy: self.config.security.global(),
@@ -1192,6 +1366,7 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
     /// Remove protection from an incoming APDU, if it has any.
     fn unprotect_into<'b>(&mut self, apdu: &[u8], buf: &'b mut [u8]) -> Result<&'b [u8]> {
         let ctx = Incoming {
+            local: self.config.system_title,
             peer: self.server_system_title,
             auth_key: self.protector.auth_key(),
             policy: self.protector.policy(),
@@ -1206,6 +1381,21 @@ impl<P: CryptoProvider, const N: usize> ClientSession<P, N> {
 
     fn next_counter(&mut self) -> Result<u32> {
         self.invocation_counter.next()
+    }
+
+    /// Refuse a short-name service in an association that named objects the other way.
+    ///
+    /// The referencing mode is chosen once, in the application context the AARQ
+    /// proposes; a `read-request` sent into a logical-name association asks a question
+    /// the peer has not agreed to answer, and a peer that answered anyway would be
+    /// answering a different one.
+    #[cfg(feature = "sn")]
+    fn require_short_name(&self) -> Result<()> {
+        if self.config.referencing == Referencing::ShortName {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::UnexpectedMessage, 0))
+        }
     }
 
     fn require_associated(&self) -> Result<()> {

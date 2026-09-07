@@ -6,10 +6,10 @@ template = "section.html"
 page_template = "page.html"
 +++
 
-Seven pages, in the order they are worth reading. Every code sample on this site is
-compiled and run as part of the test suite, so a snippet that stops working fails the
-build rather than quietly misleading somebody.
+Eight pages, in the order they are worth reading. Every code sample on this site is
+compiled as part of the test suite, so a snippet that stops working fails the build rather
+than quietly misleading somebody.
 
-If you are looking for signatures rather than prose, the API reference is generated from
-the same source by `cargo doc --open`, and will be on
-[docs.rs](https://docs.rs/dlms-cosem-rs) once the crate is published.
+For signatures rather than prose, the API reference comes from the same source:
+`cargo doc --open`, and [docs.rs](https://docs.rs/dlms-cosem-rs) once the crate is
+published.

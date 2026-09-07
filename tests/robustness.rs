@@ -54,6 +54,49 @@ fn decoders() -> Vec<Decoder> {
                 let _ = a.is_protected();
             }
         }),
+        // The short-name services are lists of lists, and a list is not really decoded
+        // until it is iterated — which is exactly where a length lie lands.
+        #[cfg(feature = "sn")]
+        ("read-request", |b| {
+            if let Ok(r) = dlms_cosem_rs::xdlms::ReadRequest::from_bytes(b) {
+                for entry in r.specification.iter() {
+                    let _ = entry.map(|e| e.name());
+                }
+            }
+        }),
+        #[cfg(feature = "sn")]
+        ("read-response", |b| {
+            if let Ok(r) = dlms_cosem_rs::xdlms::ReadResponse::from_bytes(b) {
+                for result in r.results.iter() {
+                    if let Ok(dlms_cosem_rs::xdlms::ReadResult::Data(d)) = result {
+                        walk(&d, 0);
+                    }
+                }
+            }
+        }),
+        #[cfg(feature = "sn")]
+        ("write-request", |b| {
+            if let Ok(r) = dlms_cosem_rs::xdlms::WriteRequest::from_bytes(b) {
+                assert!(
+                    r.specification.as_bytes().len() <= b.len(),
+                    "a list longer than the input it came from"
+                );
+                for entry in r.specification.iter() {
+                    let _ = entry.map(|e| e.name());
+                }
+                for d in r.values.iter().flatten() {
+                    walk(&d, 0);
+                }
+            }
+        }),
+        #[cfg(feature = "sn")]
+        ("information-report", |b| {
+            if let Ok(r) = dlms_cosem_rs::xdlms::InformationReportRequest::from_bytes(b) {
+                for d in r.values.iter().flatten() {
+                    walk(&d, 0);
+                }
+            }
+        }),
         ("aarq", |b| {
             let _ = Aarq::from_bytes(b);
         }),

@@ -12,7 +12,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.dlms-cosem-rs]
 path = ".."
-features = ["std", "client", "server", "hdlc", "wrapper", "p1", "suite0"]
+features = ["std", "client", "server", "hdlc", "wrapper", "p1", "suite0", "sn"]
 
 [[bin]]
 name = "data"

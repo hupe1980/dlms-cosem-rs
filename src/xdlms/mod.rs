@@ -28,6 +28,8 @@ mod notify;
 mod protection;
 mod result;
 mod service;
+#[cfg(feature = "sn")]
+mod sn;
 mod tag;
 
 pub use access::{
@@ -50,5 +52,11 @@ pub use result::{ActionResult, DataAccessResult, DataBlockG, DataBlockSA, GetDat
 pub use service::{
     ActionRequest, ActionResponse, ActionResponseWithOptionalData, GetRequest, GetResponse, SetRequest,
     SetResponse,
+};
+#[cfg(feature = "sn")]
+pub use sn::{
+    ATTRIBUTE_STRIDE, CURRENT_ASSOCIATION_SN, InformationReportRequest, ObjectName, ReadRequest,
+    ReadResponse, ReadResult, UnconfirmedWriteRequest, VariableAccess, WriteRequest, WriteResponse,
+    WriteResult,
 };
 pub use tag::{ApduTag, Protection};

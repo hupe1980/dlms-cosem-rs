@@ -65,9 +65,10 @@ jobs:
       - name: every feature stands on its own
         run: |
           set -euo pipefail
-          for f in "" std alloc client server hdlc wrapper p1 suite0 crypto obis-names heapless \
+          for f in "" std alloc client server hdlc wrapper p1 suite0 crypto obis-names heapless sn \
                    std,client std,server std,server,suite0 std,client,suite0 \
-                   alloc,client,hdlc,suite0 std,hdlc,wrapper alloc,p1; do
+                   alloc,client,hdlc,suite0 std,hdlc,wrapper alloc,p1 \
+                   std,client,sn std,server,sn std,client,server,sn,suite0; do
             echo "::group::features=[$f]"
             if [ -z "$f" ]; then cargo build --no-default-features; else cargo build --no-default-features --features "$f"; fi
             echo "::endgroup::"
@@ -88,9 +89,9 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: build without alloc
-        run: cargo build --target ${{ matrix.target }} --no-default-features --features client,server,hdlc,wrapper,p1,suite0
+        run: cargo build --target ${{ matrix.target }} --no-default-features --features client,server,hdlc,wrapper,p1,suite0,sn
       - name: build with alloc
-        run: cargo build --target ${{ matrix.target }} --no-default-features --features alloc,client,server,hdlc,wrapper,p1,suite0,heapless
+        run: cargo build --target ${{ matrix.target }} --no-default-features --features alloc,client,server,hdlc,wrapper,p1,suite0,heapless,sn
 
   lint:
     runs-on: ubuntu-latest
@@ -142,8 +143,8 @@ jobs:
         run: |
           set -euo pipefail
           for feats in "client,hdlc,wrapper,suite0" \
-                       "client,server,hdlc,wrapper,p1,suite0,obis-names" \
-                       "alloc,client,server,hdlc,wrapper,p1,suite0,heapless"; do
+                       "client,server,hdlc,wrapper,p1,suite0,obis-names,sn" \
+                       "alloc,client,server,hdlc,wrapper,p1,suite0,heapless,sn"; do
             echo "::group::features=[$feats]"
             CARGO_PROFILE_RELEASE_LTO=false cargo build --release \
               --target thumbv7em-none-eabihf --no-default-features --features "$feats"
@@ -169,10 +170,10 @@ jobs:
       - name: arithmetic overflow paths may not increase
         run: |
           set -euo pipefail
-          BASELINE=30
+          BASELINE=20
           CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true \
             cargo build --release --target thumbv7em-none-eabihf \
-            --no-default-features --features "client,server,hdlc,wrapper,p1,suite0,obis-names"
+            --no-default-features --features "client,server,hdlc,wrapper,p1,suite0,obis-names,sn"
           lib=$(find target/thumbv7em-none-eabihf/release -name 'libdlms_cosem_rs*.rlib' | head -1)
           objdump=$(find "$(rustc --print sysroot)" -name llvm-objdump | head -1)
           n=$("$objdump" -dr "$lib" | grep -c 'panic_const_.*_overflow' || true)

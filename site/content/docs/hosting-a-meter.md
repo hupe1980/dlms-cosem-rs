@@ -89,7 +89,30 @@ address. The server never sees a transport, so the routing is not its to do.
 A client that simply drops the connection never sends a release, and a sans-I/O engine
 cannot see a closed socket. **A caller reusing a `Server` across connections must call
 `Server::reset`**, or the next client inherits the previous one's dedicated key, negotiated
-conformance and challenge.
+conformance and challenge. A new AARQ clears the same things, because a client may
+re-associate on a link it never released.
+
+Two things deliberately survive both, and the asymmetry is the point:
+
+- **The server's own invocation counter.** The association is gone but the key has not
+  changed, and a counter that went backwards would repeat a GCM nonce.
+- **The peer's replay window.** It belongs to a *peer*, not to an association. Dropping it
+  would make everything recorded from the previous connection replayable into the next one
+   — and an AARQ is unauthenticated, so anyone on the path can arrange that gap. A fresh
+  window is started by one event only: a *different* calling system title.
+
+```rust,ignore
+// Persist both, and hand both back after a restart.
+persist(server.invocation_counter(), server.replay_owner(), server.peer_invocation_counter());
+// … on the way up …
+if let (Some(peer), Some(highest)) = (stored_peer, stored_highest) {
+    server.resume_replay_window(peer, highest);
+}
+```
+
+Without that second call a server that restarts accepts every frame it has ever seen from
+that peer a second time: the counter is the only thing that distinguishes a recording from
+the real message.
 
 ## Refusals are responses, not errors
 

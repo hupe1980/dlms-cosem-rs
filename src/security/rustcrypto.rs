@@ -127,27 +127,37 @@ impl<R: RandomSource> CryptoProvider for RustCryptoProvider<R> {
 
     fn key_wrap(&self, kek: KeyRef<'_>, key: &[u8], out: &mut [u8]) -> Result<usize> {
         let k = self.resolve(kek)?;
-        let kek: [u8; 16] = k.try_into().map_err(|_| Error::new(ErrorKind::Unsupported, 0))?;
         let n = key.len() + 8;
         if out.len() < n {
             return Err(Error::new(ErrorKind::BufferTooSmall { needed: n - out.len() }, 0));
         }
-        aes_kw::KekAes128::from(kek)
-            .wrap(key, &mut out[..n])
-            .map_err(|_| Error::new(ErrorKind::InvalidLength, 0))?;
+        let bad_len = || Error::new(ErrorKind::InvalidLength, 0);
+        // The key-encrypting key's own width chooses the variant, because that is what
+        // the suite decides: suite 0 and 1 wrap under AES-128, suite 2 under AES-256.
+        // A provider that only ever built the 128-bit variant makes `key_transfer`
+        // unreachable for a suite-2 association however completely it ciphers (D39).
+        if let Ok(kek) = <[u8; 32]>::try_from(k) {
+            aes_kw::KekAes256::from(kek).wrap(key, &mut out[..n]).map_err(|_| bad_len())?;
+        } else {
+            let kek: [u8; 16] = k.try_into().map_err(|_| Error::new(ErrorKind::Unsupported, 0))?;
+            aes_kw::KekAes128::from(kek).wrap(key, &mut out[..n]).map_err(|_| bad_len())?;
+        }
         Ok(n)
     }
 
     fn key_unwrap(&self, kek: KeyRef<'_>, wrapped: &[u8], out: &mut [u8]) -> Result<usize> {
         let k = self.resolve(kek)?;
-        let kek: [u8; 16] = k.try_into().map_err(|_| Error::new(ErrorKind::Unsupported, 0))?;
         let n = wrapped.len().checked_sub(8).ok_or_else(|| Error::new(ErrorKind::InvalidLength, 0))?;
         if out.len() < n {
             return Err(Error::new(ErrorKind::BufferTooSmall { needed: n - out.len() }, 0));
         }
-        aes_kw::KekAes128::from(kek)
-            .unwrap(wrapped, &mut out[..n])
-            .map_err(|_| Error::new(ErrorKind::BadTag, 0))?;
+        let bad_tag = || Error::new(ErrorKind::BadTag, 0);
+        if let Ok(kek) = <[u8; 32]>::try_from(k) {
+            aes_kw::KekAes256::from(kek).unwrap(wrapped, &mut out[..n]).map_err(|_| bad_tag())?;
+        } else {
+            let kek: [u8; 16] = k.try_into().map_err(|_| Error::new(ErrorKind::Unsupported, 0))?;
+            aes_kw::KekAes128::from(kek).unwrap(wrapped, &mut out[..n]).map_err(|_| bad_tag())?;
+        }
         Ok(n)
     }
 
@@ -287,19 +297,6 @@ impl RandomSource for FixedRandom {
     fn fill(&self, out: &mut [u8]) -> Result<()> {
         out.fill(self.0);
         Ok(())
-    }
-}
-
-impl KeyUsage {
-    /// The key id used by `general-ciphering`'s identified-key form.
-    #[must_use]
-    pub const fn key_id(self) -> Option<u8> {
-        match self {
-            Self::GlobalUnicastEncryption => Some(0),
-            Self::GlobalBroadcastEncryption => Some(1),
-            Self::Authentication => Some(2),
-            _ => None,
-        }
     }
 }
 
@@ -522,6 +519,46 @@ mod tests {
         let n = provider.key_unwrap(KeyRef::Raw(&kek), &out, &mut back).unwrap();
         assert_eq!(n, 16);
         assert_eq!(back, key);
+    }
+
+    /// RFC 3394 sections 4.4 and 4.6: a 256-bit key-encrypting key, which is what
+    /// suite 2 wraps under. The provider chose the variant from the KEK's own width, so
+    /// this is also the check that `key_transfer` is reachable at suite 2 at all — the
+    /// D39 rule, that a capability is what the code can reach and not what the algorithm
+    /// supports, applied to key wrap.
+    #[test]
+    fn rfc3394_key_wrap_with_a_256_bit_kek() {
+        let provider = RustCryptoProvider::new(KeyRing::default());
+        let kek = hex!("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F");
+
+        // 4.4 — wrapping 128 bits of key data.
+        let key = hex!("00112233445566778899AABBCCDDEEFF");
+        let mut out = [0u8; 24];
+        let n = provider.key_wrap(KeyRef::Raw(&kek), &key, &mut out).unwrap();
+        assert_eq!(n, 24);
+        assert_eq!(out, hex!("64E8C3F9CE0F5BA263E9777905818A2A93C8191E7D6E8AE7"));
+
+        // 4.6 — wrapping 256 bits of key data, the suite-2 case.
+        let key = hex!("00112233445566778899AABBCCDDEEFF000102030405060708090A0B0C0D0E0F");
+        let mut out = [0u8; 40];
+        let n = provider.key_wrap(KeyRef::Raw(&kek), &key, &mut out).unwrap();
+        assert_eq!(n, 40);
+        assert_eq!(
+            out,
+            hex!("28C9F404C4B810F4CBCCB35CFB87F8263F5786E2D80ED326CBC7F0E71A99F43BFB988B9B7A02DD21")
+        );
+        let mut back = [0u8; 32];
+        let n = provider.key_unwrap(KeyRef::Raw(&kek), &out, &mut back).unwrap();
+        assert_eq!(n, 32);
+        assert_eq!(back, key);
+
+        // And a corrupted wrapping still fails its integrity check at this width.
+        let mut bad = out;
+        bad[5] ^= 0x01;
+        assert_eq!(
+            provider.key_unwrap(KeyRef::Raw(&kek), &bad, &mut back).unwrap_err().kind,
+            ErrorKind::BadTag
+        );
     }
 
     #[test]

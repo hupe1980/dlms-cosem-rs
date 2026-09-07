@@ -13,6 +13,10 @@ mod session;
 
 pub use notify::{NotificationListener, PushKeyLookup, ReceivedNotification, SingleMeterKeys};
 pub use session::{
-    AccessItem, AssociationStep, BlockCollector, BlockSender, ClientConfig, ClientSession, Referencing,
-    Response, SessionState,
+    AccessItem, AssociationStep, BlockCollector, BlockSender, ClientConfig, ClientSession, Response,
+    SessionState,
 };
+
+/// How objects are addressed. Re-exported from [`crate::acse`], where the application
+/// context that carries it lives.
+pub use crate::acse::Referencing;

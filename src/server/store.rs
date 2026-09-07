@@ -87,6 +87,23 @@ pub trait ObjectStore {
         MethodAccess::empty()
     }
 
+    /// Which attribute or method a **short name** addresses.
+    ///
+    /// Only a short-name association ever asks. The mapping is the store's because it is
+    /// the store's to define: a short name is an object's base name plus an offset, the
+    /// base names are this device's own choice, and the offset at which a class's methods
+    /// start is a per-class constant from the Blue Book that this crate deliberately does
+    /// not guess at ([`crate::cosem::ShortName`]).
+    ///
+    /// The default answers `None` for everything, so a store that says nothing hosts no
+    /// short names — the same rule as [`ObjectStore::attribute_access`], and for the same
+    /// reason. A store with a table of [`crate::cosem::ShortName`] implements this in one
+    /// line with [`crate::cosem::sn::resolve`].
+    #[cfg(feature = "sn")]
+    fn resolve_short_name(&self, _name: u16) -> Option<crate::cosem::ShortNameTarget> {
+        None
+    }
+
     /// Record what the server was asked to do and what came of it.
     ///
     /// Called for every association attempt, every attribute read and write and every

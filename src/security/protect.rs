@@ -19,6 +19,46 @@ use crate::xdlms::SecurityControl;
 use super::keys::{Key, KeyRef, KeyUsage, SystemTitle, nonce};
 use super::{CryptoProvider, SecuritySuite};
 
+/// Which symmetric key set an association protects with.
+///
+/// One field rather than two flags: the three are alternatives, and "dedicated and
+/// broadcast at once" would name a key nothing holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeySet {
+    /// The global unicast encryption key — ordinary traffic, and everything that runs
+    /// before an association has a key of its own.
+    #[default]
+    GlobalUnicast,
+    /// The global broadcast encryption key, shared across a fleet.
+    GlobalBroadcast,
+    /// The key this association negotiated, delivered in the `InitiateRequest`.
+    Dedicated,
+}
+
+impl KeySet {
+    /// The key this set resolves to.
+    #[must_use]
+    pub const fn usage(self) -> KeyUsage {
+        match self {
+            Self::GlobalUnicast => KeyUsage::GlobalUnicastEncryption,
+            Self::GlobalBroadcast => KeyUsage::GlobalBroadcastEncryption,
+            Self::Dedicated => KeyUsage::Dedicated,
+        }
+    }
+
+    /// Whether the security control byte's broadcast bit is set for this key set.
+    #[must_use]
+    pub const fn is_broadcast(self) -> bool {
+        matches!(self, Self::GlobalBroadcast)
+    }
+
+    /// Whether this is the association's own negotiated key.
+    #[must_use]
+    pub const fn is_dedicated(self) -> bool {
+        matches!(self, Self::Dedicated)
+    }
+}
+
 /// What protection an association applies and demands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SecurityPolicy {
@@ -28,43 +68,83 @@ pub struct SecurityPolicy {
     pub authenticated: bool,
     /// Whether outgoing APDUs are encrypted.
     pub encrypted: bool,
-    /// Whether the dedicated key is used instead of the global one.
-    pub dedicated: bool,
+    /// Which key set protects an APDU — and, on the receiving side, which one this end
+    /// will *accept*.
+    ///
+    /// The security control byte's broadcast bit is the sender's claim. Letting it choose
+    /// the key would hand an attacker that choice, and a broadcast key is shared with a
+    /// whole fleet: a unicast exchange accepted under one lets any fleet member speak as
+    /// the head-end, with a tag that verifies. So this states what is demanded, and a
+    /// frame whose bit disagrees is refused before a key is touched.
+    pub key_set: KeySet,
 }
 
 impl SecurityPolicy {
     /// No protection at all.
-    pub const NONE: Self =
-        Self { suite: SecuritySuite::Suite0, authenticated: false, encrypted: false, dedicated: false };
+    pub const NONE: Self = Self {
+        suite: SecuritySuite::Suite0,
+        authenticated: false,
+        encrypted: false,
+        key_set: KeySet::GlobalUnicast,
+    };
 
     /// Authenticated and encrypted with the given suite — what a ciphered association
     /// normally uses.
     #[must_use]
     pub const fn authenticated_encrypted(suite: SecuritySuite) -> Self {
-        Self { suite, authenticated: true, encrypted: true, dedicated: false }
+        Self { suite, authenticated: true, encrypted: true, key_set: KeySet::GlobalUnicast }
     }
 
-    /// The same protection with the global key set instead of the dedicated one.
+    /// The same protection on the **global unicast** key set.
     ///
-    /// The `InitiateRequest` and `InitiateResponse` are always protected globally, even
+    /// The `InitiateRequest` and `InitiateResponse` are always protected this way, even
     /// in an association that will use a dedicated key for everything afterwards: the
     /// dedicated key is *delivered* inside the ciphered `InitiateRequest`, so nothing
-    /// can be protected with it before that message has been opened.
+    /// can be protected with it before that message has been opened. The same holds for
+    /// HLS, which runs before the association is open.
     #[must_use]
     pub const fn global(self) -> Self {
-        Self { dedicated: false, ..self }
+        Self { key_set: KeySet::GlobalUnicast, ..self }
     }
 
-    /// The same protection with the dedicated key set.
+    /// The same protection with the dedicated key set, or back on the unicast one.
     #[must_use]
     pub const fn with_dedicated(self, dedicated: bool) -> Self {
-        Self { dedicated, ..self }
+        Self { key_set: if dedicated { KeySet::Dedicated } else { KeySet::GlobalUnicast }, ..self }
+    }
+
+    /// The same protection on the broadcast key set, or back on the unicast one.
+    ///
+    /// For a receiver this says which key set it will *accept*; see
+    /// [`SecurityPolicy::key_set`].
+    #[must_use]
+    pub const fn with_broadcast(self, broadcast: bool) -> Self {
+        Self { key_set: if broadcast { KeySet::GlobalBroadcast } else { KeySet::GlobalUnicast }, ..self }
+    }
+
+    /// True when this association uses the key it negotiated for itself.
+    #[must_use]
+    pub const fn dedicated(self) -> bool {
+        self.key_set.is_dedicated()
+    }
+
+    /// True when this association uses the broadcast key set.
+    #[must_use]
+    pub const fn broadcast(self) -> bool {
+        self.key_set.is_broadcast()
+    }
+
+    /// Which key this policy's key set resolves to.
+    #[must_use]
+    pub const fn key_usage(self) -> KeyUsage {
+        self.key_set.usage()
     }
 
     /// The security control byte this policy produces.
     #[must_use]
     pub const fn control(self) -> SecurityControl {
         SecurityControl::new(self.suite.id(), self.authenticated, self.encrypted)
+            .with_broadcast(self.key_set.is_broadcast())
     }
 
     /// True when nothing is applied.
@@ -81,11 +161,18 @@ impl SecurityPolicy {
     /// of negotiating a policy in the first place.
     ///
     /// # Errors
-    /// [`ErrorKind::UnexpectedMessage`] when the received protection is weaker, or the
-    /// suite differs; [`ErrorKind::Unsupported`] when compression is claimed.
+    /// [`ErrorKind::UnexpectedMessage`] when the received protection is weaker, the
+    /// suite differs, or the frame names a key set this policy did not ask for;
+    /// [`ErrorKind::Unsupported`] when compression is claimed.
     pub fn check_received(self, control: SecurityControl) -> Result<()> {
         if control.compressed() {
             return Err(Error::new(ErrorKind::Unsupported, 0));
+        }
+        // Checked ahead of the `is_none` shortcut, because this bit does not describe
+        // how *strongly* a frame is protected — it decides which key opens it, and a
+        // receiver must never take that from the sender.
+        if control.broadcast_key() != self.key_set.is_broadcast() {
+            return Err(Error::new(ErrorKind::UnexpectedMessage, 0));
         }
         if self.is_none() {
             return Ok(());
@@ -125,7 +212,7 @@ impl<P: CryptoProvider> Protector<P> {
     /// construction. Both ends must agree, or every APDU decrypts to noise and fails its
     /// tag.
     pub const fn set_dedicated(&mut self, dedicated: bool) {
-        self.policy.dedicated = dedicated;
+        self.policy = self.policy.with_dedicated(dedicated);
     }
 
     /// The provider, for operations that are not protection — challenges, key wrap.
@@ -141,17 +228,6 @@ impl<P: CryptoProvider> Protector<P> {
     /// The authentication key's bytes, which every protected APDU authenticates.
     pub fn auth_key(&self) -> Option<&[u8]> {
         self.provider.authentication_key()
-    }
-
-    /// The key an APDU is protected with under `policy`.
-    const fn key_for(policy: SecurityPolicy, broadcast: bool) -> KeyUsage {
-        if policy.dedicated {
-            KeyUsage::Dedicated
-        } else if broadcast {
-            KeyUsage::GlobalBroadcastEncryption
-        } else {
-            KeyUsage::GlobalUnicastEncryption
-        }
     }
 
     /// Protect `plaintext` into `out`, returning the protected payload.
@@ -189,7 +265,7 @@ impl<P: CryptoProvider> Protector<P> {
     ) -> Result<&'o [u8]> {
         let control = policy.control();
         let iv = nonce(system_title, invocation_counter);
-        let key = KeyRef::Usage(Self::key_for(policy, false));
+        let key = KeyRef::Usage(policy.key_usage());
 
         if policy.is_none() {
             let n = plaintext.len();
@@ -255,7 +331,7 @@ impl<P: CryptoProvider> Protector<P> {
     ) -> Result<&'o [u8]> {
         policy.check_received(control)?;
         let iv = nonce(system_title, invocation_counter);
-        let key = KeyRef::Usage(Self::key_for(policy, control.broadcast_key()));
+        let key = KeyRef::Usage(policy.key_usage());
         let suite = SecuritySuite::from_id(control.suite())?;
 
         if control.is_plain() {
@@ -317,7 +393,7 @@ impl<P: CryptoProvider> Protector<P> {
         data: &[u8],
     ) -> Result<[u8; 12]> {
         self.provider.gmac(
-            KeyRef::Usage(Self::key_for(policy, control.broadcast_key())),
+            KeyRef::Usage(policy.key_usage()),
             SecuritySuite::from_id(control.suite())?,
             iv,
             &[&[control.0][..], auth_key, data],
@@ -454,5 +530,60 @@ impl<T: CryptoProvider> AeadOpenUnauthenticated for T {
         // guarantee this mode does not offer.
         let _ = self.aead_seal(key, suite, nonce, &[], buf)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The broadcast bit chooses *which key* opens a frame, so a receiver must take it
+    /// from its own configuration and never from the sender. A broadcast key is shared
+    /// with a whole fleet by definition: a unicast exchange accepted under one lets any
+    /// meter in that fleet answer as the head-end, with a tag that verifies.
+    #[test]
+    fn the_key_set_is_what_this_end_demands_not_what_the_frame_claims() {
+        let unicast = SecurityPolicy::authenticated_encrypted(SecuritySuite::Suite0);
+        let broadcast = unicast.with_broadcast(true);
+
+        assert_eq!(unicast.key_usage(), KeyUsage::GlobalUnicastEncryption);
+        assert_eq!(broadcast.key_usage(), KeyUsage::GlobalBroadcastEncryption);
+        assert!(broadcast.control().broadcast_key());
+        assert!(!unicast.control().broadcast_key());
+
+        // Each accepts its own bit and refuses the other's.
+        assert!(unicast.check_received(unicast.control()).is_ok());
+        assert!(broadcast.check_received(broadcast.control()).is_ok());
+        assert_eq!(
+            unicast.check_received(broadcast.control()).unwrap_err().kind,
+            ErrorKind::UnexpectedMessage,
+            "a frame naming the broadcast key set on a unicast association is a key downgrade"
+        );
+        assert_eq!(
+            broadcast.check_received(unicast.control()).unwrap_err().kind,
+            ErrorKind::UnexpectedMessage
+        );
+    }
+
+    /// The bit is checked ahead of the "no protection demanded" shortcut, because it is
+    /// not a statement about *how strongly* a frame is protected.
+    #[test]
+    fn an_unprotected_policy_still_refuses_a_key_set_it_did_not_ask_for() {
+        assert!(SecurityPolicy::NONE.check_received(SecurityControl(0x00)).is_ok());
+        assert_eq!(
+            SecurityPolicy::NONE.check_received(SecurityControl(0x40)).unwrap_err().kind,
+            ErrorKind::UnexpectedMessage
+        );
+    }
+
+    /// HLS and the Initiate exchange both run before an association has a key set of its
+    /// own, so `global()` has to mean the global *unicast* set and clear both switches.
+    #[test]
+    fn global_means_the_unicast_key_set() {
+        let p = SecurityPolicy::authenticated_encrypted(SecuritySuite::Suite2)
+            .with_dedicated(true)
+            .with_broadcast(true);
+        assert_eq!(p.global().key_usage(), KeyUsage::GlobalUnicastEncryption);
+        assert_eq!(p.global().suite, SecuritySuite::Suite2, "and changes nothing else");
     }
 }

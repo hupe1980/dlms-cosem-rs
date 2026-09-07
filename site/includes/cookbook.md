@@ -126,7 +126,7 @@ certificates) and none of that is implemented; there is no feature flag suggesti
 otherwise.
 
 **A dedicated key** is negotiated rather than configured. Put one in the client's ring
-and set `dedicated` on the policy:
+and name it on the policy's key set:
 
 ```rust,ignore
 let mut keys = KeyRing::new(guek, gak);
@@ -158,6 +158,40 @@ client                                  server
 `ClientSession::handle_associate_response` returns `AssociationStep::HlsReplyRequired`
 when the third pass is needed, so a driver that loops on the step handles both cases
 without knowing which mechanism was configured.
+
+### When the association will not open because the counter is stale
+
+The `InitiateRequest` is the first protected message a ciphered association sends, so a
+client that restarted from a backup fails **there** rather than on its first read. The
+server answers `invocation-counter-error` carrying the value it expects next, and the
+client reads it as a step of its own:
+
+```rust,ignore
+match session.handle_associate_response(&aare)? {
+    AssociationStep::Exception(e) => {
+        if let Some(expected) = e.expected_invocation_counter {
+            // A deliberate decision, made once, by you: an exception response is
+            // unprotected and anyone can forge one, and moving a counter *backwards*
+            // is what burns a key.
+            session.set_invocation_counter(expected.saturating_sub(1));
+        }
+    }
+    step => { /* … */ }
+}
+```
+
+### Which key set opens a frame is yours to state
+
+The security control byte carries a bit naming the broadcast key set, and on a received
+frame that bit is the sender's claim. A broadcast key is shared with a whole fleet, so a
+unicast exchange accepted under one lets any member of that fleet answer as the head-end,
+with a tag that verifies. So the key set is part of the policy — `key_set`, defaulting to
+the global unicast key — and a frame whose bit disagrees is refused before a key is
+touched. A caller that genuinely wants the broadcast key set asks for it:
+
+```rust,ignore
+security: SecurityPolicy::authenticated_encrypted(SecuritySuite::Suite0).with_broadcast(true),
+```
 
 ## Read a dozen registers in one round trip
 
@@ -611,6 +645,11 @@ Persist `SingleMeterKeys::replay`'s `highest()` and restore it with
 `ReplayWindow::resumed`, or a listener that restarts accepts every frame it has ever
 seen a second time.
 
+The same holds for a `Server`, and there it is easy to miss because the window survives
+`Server::reset` on its own — but not a process restart. Persist `Server::replay_owner`
+alongside `Server::peer_invocation_counter`, and restore both with
+`Server::resume_replay_window`.
+
 ## Run an HDLC link without keeping the sequence numbers yourself
 
 `Framer`, `Segmenter` and `Reassembler` are the pieces. `Connection` is the machine, and
@@ -802,6 +841,47 @@ Three things that cost people an afternoon, and what this does about each:
 Luxembourg's P1 is a different thing on the same connector: an *encrypted DLMS
 `DataNotification`*, which is the notification listener above and not this parser.
 
+## Read an older meter that speaks short names
+
+Turn on the `sn` feature. It is off by default: short-name referencing is a legacy
+addressing mode, and proposing it to a modern meter proposes something it will refuse.
+
+The mode belongs to the **association**, agreed once in the application context, so it is
+configured rather than chosen per request:
+
+```rust,ignore
+use dlms_cosem_rs::acse::Referencing;
+use dlms_cosem_rs::client::{ClientConfig, Response};
+use dlms_cosem_rs::cosem::ShortName;
+use dlms_cosem_rs::xdlms::VariableAccess;
+
+let config = ClientConfig { referencing: Referencing::ShortName, ..Default::default() };
+```
+
+A short name is an object's **base name** plus an offset. Attribute *n* is
+`base + (n − 1) × 8`, which `ShortName` computes; base names come from the meter's own
+`Association SN` object list, so a client need not know them in advance. Where a class's
+**methods** start is a per-class Blue Book constant, so you supply it — and a class whose
+offset you do not know has no addressable methods, which beats invoking the wrong one:
+
+```rust,ignore
+// Register: three attributes at base 0x0028, and its class puts `reset` at x + 0x28.
+let energy = ShortName::new(0x0028, 3, obis!("1-0:1.8.0*255"), 3).with_methods(0x28, 1);
+
+let n = session.read_request(
+    &[VariableAccess::VariableName(energy.attribute(2).unwrap())],
+    &mut out,
+)?;
+if let Response::ReadResults(results) = session.handle_response(&answer, &mut scratch)? {
+    for result in results.iter() { /* one per entry, in order */ }
+}
+```
+
+Two things bite if you miss them. There is **no ACTION service** — a method is invoked by
+*writing* its short name, with the value as the parameter. And `unconfirmed_write_request`
+really is unconfirmed: the meter sends nothing back, so a caller that waits for a reply
+waits for ever.
+
 ## Label an attribute you have never seen
 
 The class registry answers for `CLASS_COUNT` classes — 102 today, of which 25 carry full
@@ -829,7 +909,7 @@ assert_eq!(attribute_name(152, 0, 2), None);
 
 ```toml
 [dependencies]
-dlms-cosem-rs = { version = "0.0", default-features = false, features = [
+dlms-cosem-rs = { version = "0.1", default-features = false, features = [
     "client", "hdlc", "suite0",
 ] }
 ```

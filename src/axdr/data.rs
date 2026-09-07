@@ -401,7 +401,7 @@ impl<'a> Data<'a> {
                 for _ in 0..count {
                     Self::skip(&mut probe, depth + 1)?;
                 }
-                let used = probe.offset() - start;
+                let used = probe.consumed();
                 let raw = r.take(used)?;
                 let seq = Seq { count, raw, base: start, depth: depth + 1 };
                 if tag == DataTag::Array { Self::Array(seq) } else { Self::Structure(seq) }

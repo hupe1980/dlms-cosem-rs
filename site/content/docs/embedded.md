@@ -8,7 +8,7 @@ weight = 60
 
 ```toml
 [dependencies]
-dlms-cosem-rs = { version = "0.0", default-features = false, features = [
+dlms-cosem-rs = { version = "0.1", default-features = false, features = [
     "client", "hdlc", "suite0",
 ] }
 ```

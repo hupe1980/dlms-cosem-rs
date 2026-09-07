@@ -108,6 +108,32 @@ fn ciphered_pair() -> (Client, Meter) {
     (client, server)
 }
 
+/// The same, for a client that identifies itself as somebody else.
+fn ciphered_pair_titled(title: SystemTitle) -> (Client, Meter) {
+    let policy = SecurityPolicy::authenticated_encrypted(SecuritySuite::Suite0);
+    let client = ClientSession::new(
+        ClientConfig {
+            client_sap: 0x30,
+            system_title: Some(title),
+            mechanism: AuthMechanism::HighGmac,
+            security: policy,
+            ..Default::default()
+        },
+        RustCryptoProvider::with_rng(KeyRing::new(GUEK, GAK), FixedRandom(0xA1)),
+    );
+    let server = Server::new(
+        ServerConfig {
+            system_title: Some(SERVER_TITLE),
+            mechanism: AuthMechanism::HighGmac,
+            security: policy,
+            ..Default::default()
+        },
+        TestMeter::default(),
+        RustCryptoProvider::with_rng(KeyRing::new(GUEK, GAK), FixedRandom(0xB2)),
+    );
+    (client, server)
+}
+
 /// A ciphered pair that negotiates a **dedicated** key: the client delivers one inside
 /// the ciphered InitiateRequest and both ends switch to `ded-` tags afterwards.
 fn dedicated_pair() -> (Client, Meter) {
@@ -675,16 +701,21 @@ fn resetting_a_server_forgets_the_association_but_not_the_counter() {
 
     let counter_before = server.invocation_counter();
     assert!(counter_before > 0);
-    assert!(server.peer_invocation_counter().is_some());
+    let peer_counter_before = server.peer_invocation_counter().expect("the client has spent counters");
 
     server.reset();
 
     assert_eq!(server.state(), ServerState::Idle);
-    assert_eq!(server.peer_invocation_counter(), None, "the next client is a different peer");
     assert_eq!(
         server.invocation_counter(),
         counter_before,
         "the counter must never go backwards: the key has not changed"
+    );
+    assert_eq!(
+        server.peer_invocation_counter(),
+        Some(peer_counter_before),
+        "and neither does the peer's window: the same client reconnecting must not be \
+         able to replay what it sent before the gap"
     );
 
     // A service without a fresh association is refused.
@@ -695,10 +726,396 @@ fn resetting_a_server_forgets_the_association_but_not_the_counter() {
         dlms_cosem_rs::Apdu::ExceptionResponse(_)
     ));
 
-    // And a fresh association works, continuing the counter rather than restarting it.
-    let (mut second, _) = ciphered_pair();
+    // And a fresh association from *another* peer works, continuing the server's own
+    // counter rather than restarting it. Another peer's title is what starts a new
+    // window; the counters of one client say nothing about another's, and this one
+    // starts from zero.
+    let (mut second, _) = ciphered_pair_titled(SystemTitle::new(*b"CLI\0\0\0\0\x02"));
     assert_eq!(associate(&mut second, &mut server), AssociationStep::Established);
     assert!(server.invocation_counter() > counter_before);
+    assert_eq!(server.replay_owner(), Some(SystemTitle::new(*b"CLI\0\0\0\0\x02")));
+}
+
+/// The window is the only thing standing between a recorded frame and a second
+/// execution, and a dropped connection is exactly the gap an attacker arranges: an AARQ
+/// is unauthenticated, so anyone on the path can make the association restart.
+///
+/// So a peer that comes back keeps its window. What starts a fresh one is a *different*
+/// system title, because a different sender's counters say nothing about this one's.
+#[test]
+fn a_reconnecting_client_cannot_replay_what_it_sent_before_the_gap() {
+    let (mut client, mut server) = ciphered_pair();
+    associate(&mut client, &mut server);
+    let mut c = [0u8; 512];
+    let mut s = [0u8; 512];
+    let mut plain = [0u8; 512];
+
+    // A breaker operation, recorded off the wire.
+    let n =
+        client.action_request(MethodDescriptor::new(70, BREAKER, 1), Some(Data::Integer(0)), &mut c).unwrap();
+    let recorded = c[..n].to_vec();
+    let m = server.handle(&c[..n], &mut s).unwrap();
+    client.handle_response(&s[..m], &mut plain).unwrap();
+    let operations = server.store().breaker_operations;
+
+    // The connection drops and the same client reconnects, restoring the counter it
+    // persisted — which is what a client that does not want to burn its key must do.
+    server.reset();
+    let (mut again, _) = ciphered_pair();
+    again.set_invocation_counter(client.invocation_counter());
+    assert_eq!(associate(&mut again, &mut server), AssociationStep::Established);
+
+    // The recording goes back on the wire. It really was sent under the real key, so the
+    // tag verifies — only the counter says it has been seen.
+    let m = server.handle(&recorded, &mut s).unwrap();
+    let apdu = dlms_cosem_rs::Apdu::from_bytes(&s[..m]).unwrap();
+    match apdu {
+        dlms_cosem_rs::Apdu::ExceptionResponse(e) => {
+            assert_eq!(e.service_error, dlms_cosem_rs::xdlms::ServiceError::InvocationCounterError);
+        }
+        other => panic!("a replay across a reconnection must be refused by name: {other:?}"),
+    }
+    assert_eq!(server.store().breaker_operations, operations, "and must not move the breaker again");
+}
+
+/// A client that restarts from a stale counter is the commonest cause of a replay, and
+/// it fails at the *first* protected message there is — the InitiateRequest inside the
+/// AARQ. Before this, that produced a transport error with nothing on the wire: the
+/// client saw a dropped connection and retried the same stale value for ever.
+#[test]
+fn a_stale_counter_is_answered_with_the_value_to_move_to() {
+    let (mut client, mut server) = ciphered_pair();
+    associate(&mut client, &mut server);
+    let mut c = [0u8; 512];
+    let mut s = [0u8; 512];
+    let mut plain = [0u8; 512];
+    let n = client.get_request(AttributeDescriptor::new(3, ENERGY, 2), None, &mut c).unwrap();
+    let m = server.handle(&c[..n], &mut s).unwrap();
+    client.handle_response(&s[..m], &mut plain).unwrap();
+    server.reset();
+
+    // The same client restarts from a backup and its counter has gone backwards.
+    let (mut restarted, _) = ciphered_pair();
+    let n = restarted.associate_request(&mut c).unwrap();
+    let m = server.handle(&c[..n], &mut s).expect("a refusal is a response, not an error");
+    let expected = match restarted.handle_associate_response(&s[..m]).unwrap() {
+        AssociationStep::Exception(e) => {
+            assert_eq!(e.service_error, dlms_cosem_rs::xdlms::ServiceError::InvocationCounterError);
+            e.expected_invocation_counter.expect("and it says what to move to")
+        }
+        other => panic!("a stale counter must be named, not dropped: {other:?}"),
+    };
+
+    // Moving to it deliberately — never automatically — restores the association.
+    let (mut recovered, _) = ciphered_pair();
+    recovered.set_invocation_counter(expected.saturating_sub(1));
+    assert_eq!(associate(&mut recovered, &mut server), AssociationStep::Established);
+}
+
+/// The broadcast bit inside a received security header chooses *which key* verifies the
+/// frame. A receiver that took it from the sender would let anyone holding the fleet's
+/// broadcast key speak to any meter as the head-end, with a tag that verifies — so the
+/// bit is compared against what this end demands, before a key is touched.
+#[test]
+fn a_frame_claiming_the_broadcast_key_set_is_refused_on_a_unicast_association() {
+    let (mut client, mut server) = ciphered_pair();
+    associate(&mut client, &mut server);
+    let mut c = [0u8; 512];
+    let mut s = [0u8; 512];
+
+    let spent_before = server.peer_invocation_counter();
+    let n = client.get_request(AttributeDescriptor::new(3, ENERGY, 2), None, &mut c).unwrap();
+    // A `glo-get-request` is tag, length, security control, counter, payload. Flip the
+    // broadcast bit in the control byte where it travels in the clear.
+    let control = 2;
+    assert_eq!(c[0], 0xC8, "a ciphered GET request");
+    assert_eq!(c[control] & 0x40, 0, "and it is unicast to start with");
+    c[control] |= 0x40;
+
+    let m = server.handle(&c[..n], &mut s).unwrap();
+    let mut plain = [0u8; 512];
+    match client.handle_response(&s[..m], &mut plain).unwrap() {
+        Response::Exception(e) => {
+            assert_eq!(e.service_error, dlms_cosem_rs::xdlms::ServiceError::DecipheringError);
+        }
+        other => panic!("a key-set downgrade must be refused: {other:?}"),
+    }
+    assert_eq!(
+        server.peer_invocation_counter(),
+        spent_before,
+        "and the counter it carried is not spent, so the real request can still be sent"
+    );
+}
+
+/// `general-signing` is decoded as a type and cannot be opened: it needs suite 1's or
+/// suite 2's asymmetric half. That has to be sayable, because a caller cannot otherwise
+/// tell a wrapper this crate does not implement from a peer that dropped protection.
+#[test]
+fn a_protection_wrapper_this_crate_cannot_open_is_named_rather_than_read_as_plaintext() {
+    let (mut client, mut server) = ciphered_pair();
+    associate(&mut client, &mut server);
+    let mut plain = [0u8; 512];
+    let _ = &mut server;
+
+    // Seven zero bytes decode as a signing header of seven empty fields.
+    let frame = [0xDFu8, 0, 0, 0, 0, 0, 0, 0];
+    assert_eq!(
+        client.handle_response(&frame, &mut plain).unwrap_err().kind,
+        ErrorKind::Unsupported,
+        "general-signing must be refused by name, not as a downgrade"
+    );
+}
+
+/// Rewrap the ciphered content of `apdu` — a `glo-`/`ded-` or `general-glo-` frame — as a
+/// `general-ciphering` APDU. The content is protected identically in all of them (same
+/// nonce, same additional data), so the tag stays valid and only the header changes.
+fn as_general_ciphering(
+    apdu: &[u8],
+    originator: SystemTitle,
+    recipient: &[u8],
+    key_info: Option<dlms_cosem_rs::xdlms::KeyInfo<'_>>,
+    out: &mut [u8],
+) -> usize {
+    use dlms_cosem_rs::codec::{Decode, Encode, SliceWriter};
+    use dlms_cosem_rs::xdlms::{Apdu, GeneralCiphering};
+
+    let ciphered = match Apdu::from_bytes(apdu).unwrap() {
+        Apdu::Ciphered { body, .. } => body,
+        Apdu::GeneralCiphered { body: g, .. } => g.ciphered,
+        other => panic!("not a protected APDU: {other:?}"),
+    };
+    let g = GeneralCiphering {
+        transaction_id: &[],
+        originator_system_title: originator.as_bytes(),
+        recipient_system_title: recipient,
+        date_time: &[],
+        other_information: &[],
+        key_info,
+        ciphered,
+    };
+    let mut w = SliceWriter::new(out);
+    w.write_u8(0xDD).unwrap();
+    g.encode(&mut w).unwrap();
+    w.written()
+}
+
+/// `general-ciphering` names both ends and carries its own key information. Its content
+/// is protected exactly as `general-glo-ciphering`'s is, so the identified-key form needs
+/// nothing this crate lacks — and it is the form a peer uses when it wants to name the
+/// recipient. Opening one is what lets this crate talk to a stack that prefers it.
+#[test]
+fn a_general_ciphering_frame_in_its_identified_key_form_is_opened() {
+    use dlms_cosem_rs::xdlms::KeyInfo;
+
+    let (mut client, mut server) = ciphered_pair();
+    associate(&mut client, &mut server);
+    let mut c = [0u8; 512];
+    let mut s = [0u8; 512];
+    let mut plain = [0u8; 512];
+    let mut wrapped = [0u8; 512];
+
+    let n = client.get_request(AttributeDescriptor::new(3, ENERGY, 2), None, &mut c).unwrap();
+    let m = server.handle(&c[..n], &mut s).unwrap();
+
+    // The same answer, re-headed as `general-ciphering` naming both ends.
+    let k = as_general_ciphering(
+        &s[..m],
+        SERVER_TITLE,
+        CLIENT_TITLE.as_bytes(),
+        Some(KeyInfo::Identified { key_id: 0 }),
+        &mut wrapped,
+    );
+    match client.handle_response(&wrapped[..k], &mut plain).unwrap() {
+        Response::Data(d) => assert_eq!(d.as_u64(), Some(12_345_678)),
+        other => panic!("the reading must come through: {other:?}"),
+    }
+}
+
+/// Every field of a `general-ciphering` header travels in the clear and outside the tag,
+/// so each is a hint — but the ones that decide *whether this end should open the frame
+/// at all* are still checked, and the one that decides *which key* is this end's.
+#[test]
+fn a_general_ciphering_frame_is_refused_when_its_header_says_it_is_not_ours() {
+    use dlms_cosem_rs::xdlms::KeyInfo;
+
+    let mut wrapped = [0u8; 512];
+    let mut plain = [0u8; 512];
+
+    // Each case gets its own pair, because a refused frame must not spend a counter that
+    // a later case then depends on.
+    /// One way a `general-ciphering` header can be somebody else's, and the refusal it
+    /// must produce.
+    struct Case<'a> {
+        what: &'a str,
+        originator: SystemTitle,
+        recipient: &'a [u8],
+        key_info: Option<KeyInfo<'a>>,
+        expected: ErrorKind,
+    }
+
+    let cases = [
+        Case {
+            what: "addressed to another client",
+            originator: SERVER_TITLE,
+            recipient: b"OTHER\0\0\0",
+            key_info: None,
+            expected: ErrorKind::UnexpectedMessage,
+        },
+        Case {
+            what: "claiming to come from another meter",
+            originator: SystemTitle::new(*b"XXX\0\0\0\0\x09"),
+            recipient: CLIENT_TITLE.as_bytes(),
+            key_info: None,
+            expected: ErrorKind::UnexpectedMessage,
+        },
+        Case {
+            what: "naming the broadcast key set",
+            originator: SERVER_TITLE,
+            recipient: CLIENT_TITLE.as_bytes(),
+            key_info: Some(KeyInfo::Identified { key_id: 1 }),
+            expected: ErrorKind::UnexpectedMessage,
+        },
+        Case {
+            what: "delivering a wrapped key",
+            originator: SERVER_TITLE,
+            recipient: CLIENT_TITLE.as_bytes(),
+            key_info: Some(KeyInfo::Wrapped { kek_id: 0, ciphered_key: &[0u8; 24] }),
+            expected: ErrorKind::Unsupported,
+        },
+    ];
+
+    for Case { what, originator, recipient, key_info, expected } in cases {
+        let (mut client, mut server) = ciphered_pair();
+        associate(&mut client, &mut server);
+        let mut c = [0u8; 512];
+        let mut s = [0u8; 512];
+        let n = client.get_request(AttributeDescriptor::new(3, ENERGY, 2), None, &mut c).unwrap();
+        let m = server.handle(&c[..n], &mut s).unwrap();
+        let k = as_general_ciphering(&s[..m], originator, recipient, key_info, &mut wrapped);
+        assert_eq!(
+            client.handle_response(&wrapped[..k], &mut plain).unwrap_err().kind,
+            expected,
+            "a frame {what} must be refused"
+        );
+    }
+}
+
+/// A dedicated association agreed to use the key it negotiated. A `glo-` tagged service
+/// APDU names the *other* key set, and which key opens a message is not the sender's to
+/// choose — the same rule as the broadcast bit, applied where the tag carries it.
+///
+/// It also catches the honest version of the same fault, which is the expensive one: one
+/// end switching to the dedicated key and the other not. Before this, that showed up as a
+/// tag failure on every message with nothing to point at.
+#[test]
+fn a_dedicated_association_refuses_a_frame_on_the_global_key_set() {
+    let (mut client, mut server) = dedicated_pair();
+    assert_eq!(associate(&mut client, &mut server), AssociationStep::Established);
+    let mut c = [0u8; 512];
+    let mut s = [0u8; 512];
+
+    let n = client.get_request(AttributeDescriptor::new(3, ENERGY, 2), None, &mut c).unwrap();
+    assert_eq!(c[0], 0xD0, "a dedicated association sends ded-get-request");
+    // Rewrite the tag as its global sibling. The body is unchanged, so this is exactly
+    // the frame a peer that had not switched would send.
+    c[0] = 0xC8;
+
+    let m = server.handle(&c[..n], &mut s).unwrap();
+    let mut plain = [0u8; 512];
+    match client.handle_response(&s[..m], &mut plain).unwrap() {
+        Response::Exception(e) => {
+            assert_eq!(e.service_error, dlms_cosem_rs::xdlms::ServiceError::DecipheringError);
+        }
+        other => panic!("a key-set mismatch must be refused: {other:?}"),
+    }
+}
+
+/// A provider that will not hold a dedicated key.
+///
+/// The default `CryptoProvider` behaviour, which a secure element backed by fixed slots
+/// would have — and which used to leave the association half-switched.
+#[derive(Debug)]
+struct NoDedicatedKey(RustCryptoProvider<FixedRandom>);
+
+impl dlms_cosem_rs::security::CryptoProvider for NoDedicatedKey {
+    fn aead_seal(
+        &self,
+        key: dlms_cosem_rs::security::KeyRef<'_>,
+        suite: SecuritySuite,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        buf: &mut [u8],
+    ) -> dlms_cosem_rs::Result<[u8; 12]> {
+        self.0.aead_seal(key, suite, nonce, aad, buf)
+    }
+    fn aead_open(
+        &self,
+        key: dlms_cosem_rs::security::KeyRef<'_>,
+        suite: SecuritySuite,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        buf: &mut [u8],
+        tag: &[u8; 12],
+    ) -> dlms_cosem_rs::Result<()> {
+        self.0.aead_open(key, suite, nonce, aad, buf, tag)
+    }
+    fn gmac(
+        &self,
+        key: dlms_cosem_rs::security::KeyRef<'_>,
+        suite: SecuritySuite,
+        nonce: &[u8; 12],
+        aad: &[&[u8]],
+    ) -> dlms_cosem_rs::Result<[u8; 12]> {
+        self.0.gmac(key, suite, nonce, aad)
+    }
+    fn random(&self, out: &mut [u8]) -> dlms_cosem_rs::Result<()> {
+        self.0.random(out)
+    }
+    fn authentication_key(&self) -> Option<&[u8]> {
+        self.0.authentication_key()
+    }
+    // `set_dedicated_key` is left at its default, which refuses.
+}
+
+/// A server whose provider cannot hold the dedicated key the client delivered **refuses
+/// the association**. Carrying on with the global key set reads like graceful degradation
+/// and is not: the client has already switched to `ded-` tags, so nothing afterwards
+/// decrypts — and a client that asked for a key of its own and silently got the
+/// long-lived one had a security expectation quietly dropped.
+#[test]
+fn a_server_that_cannot_hold_a_dedicated_key_refuses_rather_than_half_switching() {
+    let policy = SecurityPolicy::authenticated_encrypted(SecuritySuite::Suite0).with_dedicated(true);
+    let mut client_keys = KeyRing::new(GUEK, GAK);
+    client_keys.set_dedicated(Key::new(DEDICATED));
+    let mut client: Client = ClientSession::new(
+        ClientConfig {
+            client_sap: 0x30,
+            system_title: Some(CLIENT_TITLE),
+            security: policy,
+            ..Default::default()
+        },
+        RustCryptoProvider::with_rng(client_keys, FixedRandom(0xA1)),
+    );
+    let mut server = Server::<_, _, 1024>::new(
+        ServerConfig {
+            system_title: Some(SERVER_TITLE),
+            security: SecurityPolicy::authenticated_encrypted(SecuritySuite::Suite0),
+            ..Default::default()
+        },
+        TestMeter::default(),
+        NoDedicatedKey(RustCryptoProvider::with_rng(KeyRing::new(GUEK, GAK), FixedRandom(0xB2))),
+    );
+
+    let mut c = [0u8; 512];
+    let mut s = [0u8; 512];
+    let n = client.associate_request(&mut c).unwrap();
+    let m = server.handle(&c[..n], &mut s).unwrap();
+    match client.handle_associate_response(&s[..m]).unwrap() {
+        AssociationStep::Rejected { result, .. } => {
+            assert_eq!(result, dlms_cosem_rs::acse::AssociationResult::RejectedPermanent);
+        }
+        other => panic!("the association cannot be served and must be refused: {other:?}"),
+    }
 }
 
 /// Reading a load profile: the operation DLMS exists for, and the one that never fits.

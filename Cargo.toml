@@ -1,6 +1,6 @@
 [package]
 name = "dlms-cosem-rs"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "DLMS/COSEM (IEC 62056) in Rust: sans-I/O, no_std, client and server, security suites 0-2"
@@ -18,6 +18,7 @@ include = [
     "/src",
     "/examples",
     "/README.md",
+    "/CHANGELOG.md",
     "/LICENSE-MIT",
     "/LICENSE-APACHE",
     "/site/includes/cookbook.md",
@@ -63,6 +64,11 @@ p1 = []
 # certificates — are not implemented, so there is no feature offering them.
 crypto = ["dep:zeroize", "dep:subtle"]
 suite0 = ["crypto", "dep:aes", "dep:aes-gcm", "dep:aes-kw", "dep:ghash"]
+
+# Short-name referencing: the Read/Write services an installed base of pre-logical-name
+# meters speaks. Off by default — a legacy addressing mode, and a client that proposes it
+# to a modern meter proposes something the meter will refuse.
+sn = []
 
 # Names for the well-known OBIS codes. Pure tables; off saves the strings.
 obis-names = []

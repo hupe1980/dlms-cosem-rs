@@ -101,6 +101,10 @@ impl<P: CryptoProvider, L: PushKeyLookup> NotificationListener<P, L> {
     /// interface. [`SecurityPolicy::NONE`] accepts anything, including a completely
     /// unauthenticated frame, and is for decoding a capture rather than for trusting
     /// what arrives.
+    ///
+    /// A meter that pushes under the **broadcast** key set needs
+    /// [`SecurityPolicy::with_broadcast`] here: which key set opens a frame is something
+    /// the listener demands, not something it reads out of the frame's own header.
     pub const fn new(provider: P, lookup: L, required: SecurityPolicy) -> Self {
         Self { provider, lookup, required }
     }
@@ -195,6 +199,8 @@ impl<P: CryptoProvider, L: PushKeyLookup> NotificationListener<P, L> {
                 // frame is opened with the dedicated key and a broadcast one with the
                 // GBEK, and a listener that only ever copied the unicast key would fail
                 // those with `Unsupported` rather than with anything a caller can act on.
+                // Which of the three it is comes from the tag and from the policy the
+                // caller stated, never from the frame's broadcast bit.
                 let keys = self.lookup.keys_for(&title).ok_or(Error::new(ErrorKind::Unsupported, 0))?.clone();
                 let auth_key = keys
                     .get(crate::security::KeyUsage::Authentication)
@@ -216,10 +222,15 @@ impl<P: CryptoProvider, L: PushKeyLookup> NotificationListener<P, L> {
 
                 // Unprotect under the policy that was *demanded*, not the one the frame
                 // announced, so a downgraded frame fails here rather than sailing past.
+                // The one thing the frame does decide is the *dedicated* key set, which
+                // its tag names rather than a bit inside the protected header; the
+                // broadcast key set is the caller's to demand, and `check_received` has
+                // already refused a frame that disagrees with it.
                 let mut policy = self.required;
                 policy.suite = crate::security::SecuritySuite::from_id(c.security_control.suite())?;
-                policy.dedicated =
-                    tag == ApduTag::GeneralDedCiphering || tag == ApduTag::DedEventNotification;
+                policy = policy.with_dedicated(
+                    tag == ApduTag::GeneralDedCiphering || tag == ApduTag::DedEventNotification,
+                );
                 let protector = Protector::new(ProviderWithKeys { inner: &self.provider, keys }, policy);
                 let len = protector
                     .unprotect(c.security_control, &title, c.invocation_counter, auth_key.expose(), body)?

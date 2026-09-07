@@ -28,7 +28,7 @@ let mut session: ClientSession<_> = ClientSession::new(
 // Bytes out, bytes in: the session never touches a socket.
 let mut request = [0u8; 512];
 let n = session.associate_request(&mut request)?;
-// ... send request[..n] over HDLC, TCP, CoAP, whatever you have,
+// ... send request[..n] over HDLC, TCP, a serial port, whatever you have,
 //     and feed the answer back:
 # let mut server = doctest_server();
 # let mut response = [0u8; 512];
@@ -75,11 +75,11 @@ if let Response::Data(value) = session.handle_response(&response[..m], &mut scra
 | [`codec`] | A bounds-checked cursor. Every error carries the **byte offset** it happened at. |
 | [`axdr`] | `Data` borrowed from the input — a load profile decodes without allocating. Compact arrays, delta types, COSEM date-times with their wildcards intact. |
 | [`ber`], [`acse`] | AARQ / AARE / RLRQ / RLRE: application context, authentication mechanism, system titles, conformance. |
-| [`xdlms`] | Every APDU tag. GET / SET / ACTION / ACCESS, block transfer, general block transfer with its streaming window and retry, push, exceptions, and the four protection wrappers. |
+| [`xdlms`] | Every APDU tag. GET / SET / ACTION / ACCESS, block transfer, general block transfer with its streaming window and retry, push, exceptions, the four protection wrappers, and short-name Read / Write behind the `sn` feature. |
 | [`security`] | `glo-`/`ded-`/general ciphering under suites 0–2 at both key widths, HLS-GMAC, invocation counters with a real replay window, AES key wrap — all behind a swappable [`security::CryptoProvider`], which is the one place keys live. |
 | [`cosem`] | Interface classes as a registry, OBIS, access rights in both the legacy and version-3 shapes, profile selective access, and profile buffers with all three compressions undone. |
 | [`transport`] | HDLC with a resynchronising frame finder, segmentation, and a link machine that drives SNRM/UA and the sequence numbers; the TCP/UDP wrapper with bounded reassembly; **P1** — DSMR and eMUCs telegrams, with exact decimals rather than floats. |
-| [`client`], [`server`] | Sans-I/O state machines with block transfer in both directions, every batched service, ACCESS, and both halves of push — a listener that reads a notification and a sender that builds one. |
+| [`client`], [`server`] | Sans-I/O state machines with block transfer in both directions, every batched service, ACCESS, both referencing modes, and both halves of push — a listener that reads a notification and a sender that builds one. |
 
 ## Why another one
 
@@ -151,6 +151,7 @@ nothing, so a forged counter cannot lock the real meter out.
 |---|---|
 | `client` / `server` | The two engines. A head-end needs no server; meter firmware needs no client. |
 | `hdlc` / `wrapper` / `p1` | The transports that exist: the HDLC data link, the TCP/UDP wrapper, and the P1 customer interface. |
+| `sn` | Short-name referencing — the Read/Write services an installed base of pre-logical-name meters speaks. Off by default: it is a legacy addressing mode. |
 | `suite0` | The AES-GCM provider, which serves ciphering under suites 0, 1 and 2. Implies `crypto`. |
 | `crypto` | Zeroised key storage and constant-time comparison, without a cipher. |
 | `obis-names` | Names for the well-known OBIS codes. Pure tables. |
@@ -171,23 +172,32 @@ the breaking one.
 
 **Built and tested.** The codec, OBIS, A-XDR (compact arrays and delta types included), BER
 and ACSE. Every APDU tag; GET, SET, ACTION and ACCESS with every batched `with-list` form;
-push in both directions; general block transfer with its edition-9 streaming window and
-retry. All three protection forms under suites 0, 1 and 2, with the dedicated key
-negotiated rather than configured. Replay rejection on both engines and in the push
-listener. Block transfer in *both* directions for all three services, HDLC segmentation,
-and the two composing — which is what reading a load profile over an optical probe
-actually needs. HDLC framing, segmentation and the link machine; the wrapper; P1.
+**short-name referencing** behind its own feature, through the same object store and the
+same access control as the modern services; push in both directions; general block
+transfer with its edition-9 streaming window and retry. All three protection forms under suites 0, 1 and 2 — key wrap included at both
+key-encrypting widths — with the dedicated key negotiated rather than configured. Replay
+rejection on both engines and in the push listener, per peer and outliving the association.
+Block transfer in *both* directions for all three services, HDLC segmentation, and the two
+composing — which is what reading a load profile over an optical probe actually needs.
+HDLC framing, segmentation and the link machine; the wrapper; P1.
 
 **Refused rather than guessed.** High level security mechanisms 3, 4, 6 and 7 return
 `Unsupported` by name: their exact constructions are in material this project does not
 have, and a guessed construction authenticates nothing while looking like it does. The
 asymmetric halves of suites 1 and 2 are not implemented, and there is deliberately no
-feature flag suggesting otherwise.
+feature flag suggesting otherwise; `general-ciphering` and `general-signing` decode as
+types and are refused by name rather than with the answer a plaintext downgrade gets.
 
-**Not built.** Short-name referencing; the CoAP transport; confirmed push and push
-*scheduling*; the gateway protocol, SMS, M-Bus and mode E; `tokio` and `embedded-io`
-adapters. HDLC does not retransmit and push has no schedule, for the same structural
-reason: both need a timer, and there is no clock in this crate.
+**Decisions a receiver makes are never taken from the peer.** Which protection is required,
+which key set opens a frame, and which counters have been spent are all things this end
+states — not bits it reads out of a frame that has not been authenticated yet. A frame
+naming the broadcast key set on a unicast association, or the global key set inside an
+association that negotiated a dedicated one, is refused before a key is touched.
+
+**Not built.** The CoAP transport; confirmed push and push *scheduling*; SMS, M-Bus and
+mode E; gateway *routing* (the gateway PDU itself encodes and decodes); `tokio` and
+`embedded-io` adapters. HDLC does not retransmit and push has no schedule, for the same
+structural reason: both need a timer, and there is no clock in this crate.
 
 The [status page](https://hupe1980.github.io/dlms-cosem-rs/docs/status/) has the full list,
 and what each test is actually worth.
@@ -196,7 +206,9 @@ and what each test is actually worth.
 `invocation_counter` in their config and expose the value to persist. A device that
 restarts from zero against an unchanged key reuses every nonce it used before, and a
 repeated GCM nonce leaks the authentication subkey rather than a single plaintext. The
-crate cannot detect this for you; it can only refuse to hide it.
+crate cannot detect this for you; it can only refuse to hide it — and when a peer *has*
+restarted, tell it the value to move to, at the AARQ where a ciphered association actually
+fails first.
 
 **Interoperability has not been tested.** Almost every green test is this crate agreeing
 with itself. The exceptions are the NIST and RFC cipher vectors, the published xDLMS
@@ -244,6 +256,7 @@ itself, and a simulator somebody else's stack can read is what closes it.
   the cookbook, the security model, the transports, hosting a meter, and building for a
   microcontroller.
 - **[API documentation](https://docs.rs/dlms-cosem-rs)** — generated from the same source.
+- **[CHANGELOG.md](CHANGELOG.md)** — what changed, and when.
 
 ## License
 

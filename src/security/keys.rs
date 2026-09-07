@@ -72,6 +72,24 @@ pub enum KeyUsage {
     Dedicated,
 }
 
+impl KeyUsage {
+    /// The `Key-Id` this usage has in `general-ciphering`'s identified-key form.
+    ///
+    /// `Key-Id` is an enumeration of exactly two values — `global-unicast-encryption-key`
+    /// (0) and `global-broadcast-encryption-key` (1). Every other usage answers `None`
+    /// rather than inventing a number: the authentication key in particular is *never* an
+    /// identified key, because identified-key names the key that deciphers the content
+    /// and the authentication key never does that.
+    #[must_use]
+    pub const fn key_id(self) -> Option<u8> {
+        match self {
+            Self::GlobalUnicastEncryption => Some(0),
+            Self::GlobalBroadcastEncryption => Some(1),
+            Self::Authentication | Self::KeyEncrypting | Self::Dedicated => None,
+        }
+    }
+}
+
 /// A reference to a key, without the key.
 ///
 /// A provider resolves this to material it holds — bytes in memory, a slot in a secure
@@ -334,6 +352,19 @@ pub const fn nonce(system_title: &SystemTitle, invocation_counter: u32) -> [u8; 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Key-Id` is an enumeration of two values. The authentication key is not one of
+    /// them — `identified-key` names the key that deciphers the content, and the
+    /// authentication key never does that — so answering `2` would put a number the
+    /// standard does not define into a `general-ciphering` header.
+    #[test]
+    fn only_the_two_ciphering_keys_have_a_key_id() {
+        assert_eq!(KeyUsage::GlobalUnicastEncryption.key_id(), Some(0));
+        assert_eq!(KeyUsage::GlobalBroadcastEncryption.key_id(), Some(1));
+        assert_eq!(KeyUsage::Authentication.key_id(), None);
+        assert_eq!(KeyUsage::KeyEncrypting.key_id(), None);
+        assert_eq!(KeyUsage::Dedicated.key_id(), None);
+    }
 
     #[test]
     fn a_nonce_is_the_title_then_the_counter() {
